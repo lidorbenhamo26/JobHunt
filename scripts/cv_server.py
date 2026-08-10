@@ -7,8 +7,11 @@ Endpoints:
   GET /generate?id=N   -> starts `claude -p "/generate-cv N"` in background
   GET /status?id=N     -> {"status": "running"|"done"|"error", "detail": "..."}
   GET /set-status?id=N&status=S -> updates jobs.xlsx status + rebuilds dashboard
-  GET /submit?id=N     -> starts `codex exec` that fills the application form in
-                          the user's Chrome and submits it (full-auto)
+  GET /submit?id=N&mode=review|auto -> starts `codex exec` that fills the
+                          application form in the user's Chrome. mode=review
+                          (default): stops before the final Submit, the user
+                          clicks it; Codex watches up to 10 min and confirms.
+                          mode=auto: Codex clicks Submit itself (full-auto).
   GET /submit-status?id=N -> {"status": "running"|"ready"|"login"|"captcha"|
                               "needs_input"|"error", "detail": "..."}
 
@@ -294,7 +297,7 @@ def get_job_row(job_id):
     return None
 
 
-def build_submit_prompt(job):
+def build_submit_prompt(job, mode="review"):
     cands = list((ROOT / "output" / "cv-data").glob(f"{job['id']}_*.json"))
     comp = re.sub(r"\W", "", str(job["company"] or "")).lower()[:8]
     by_comp = [p for p in cands
@@ -304,7 +307,38 @@ def build_submit_prompt(job):
     tailored_line = (str(pick) if pick
                      else "(no tailored JSON for this job - use master-cv.json only)")
     answers = ROOT / "application-answers.md"
-    return f"""Job application task. Use Chrome browser control (the user's real Chrome). Fill the application form completely and, once everything is verified correct against the data sources, submit it YOURSELF - the user has pre-approved autonomous submission (full-auto mode; they are often away from the computer).
+    if mode == "auto":
+        intro = ("Fill the application form completely and, once everything is "
+                 "verified correct against the data sources, submit it YOURSELF - "
+                 "the user has pre-approved autonomous submission for THIS run "
+                 "(full-auto mode; they are often away from the computer).")
+        step7 = ("Everything filled -> re-read the whole form once, verify every "
+                 "field against the data sources, then click the final "
+                 "Submit/Send/Apply button YOURSELF. Verify the submission actually "
+                 "went through (thank-you page, \"application submitted/received\", "
+                 "confirmation number) and finish with: SUBMITTED. If you "
+                 "deliberately chose not to submit because something looks wrong or "
+                 "uncertain, leave the page open on the review step and finish "
+                 "with: READY_FOR_REVIEW: <what stopped you>.")
+        submit_rule = ("Submitting the application yourself is allowed and "
+                       "expected (step 7).")
+    else:
+        intro = ("Fill the application form completely, verify it against the "
+                 "data sources, then STOP at the final review step - the USER "
+                 "clicks Submit themselves (review mode). You NEVER click the "
+                 "final Submit button.")
+        step7 = ("Everything filled -> re-read the whole form once, verify every "
+                 "field against the data sources, and leave the page on the final "
+                 "review step WITHOUT clicking Submit/Send/Apply. Then wait for "
+                 "the user: re-check the page every ~30 seconds, up to 10 minutes "
+                 "total. If the submission confirmation appears (thank-you page, "
+                 "\"application submitted/received\", confirmation number) - the "
+                 "user clicked Submit - finish with: SUBMITTED. If 10 minutes pass "
+                 "with no submission, finish with: READY_FOR_REVIEW: form "
+                 "complete, waiting for your Submit click.")
+        submit_rule = ("NEVER click the final Submit/Send/Apply button - that "
+                       "click is always the user's (review mode).")
+    return f"""Job application task. Use Chrome browser control (the user's real Chrome). {intro}
 
 JOB
 - Company: {job['company']}
@@ -327,12 +361,12 @@ STEPS
 4. CAPTCHA -> leave the page open and finish with: CAPTCHA_REQUIRED
 5. A REQUIRED question not answered verbatim in the data sources: answer it YOURSELF when the truthful answer is clearly inferable from them (standard eligibility like "are you 18+", years of experience with a technology, willingness/availability questions covered by application-answers.md). Stop with NEEDS_INPUT: <the question> ONLY when you cannot answer truthfully from the data sources - especially salary expectations, visa/work-authorization status, security clearance, or legal declarations that application-answers.md doesn't cover. Optional unanswered fields: leave blank.
 6. Cover letter: skip if optional. If required: 3-5 plain professional sentences strictly from the data sources, tailored to the role.
-7. Everything filled -> re-read the whole form once, verify every field against the data sources, then click the final Submit/Send/Apply button YOURSELF. Verify the submission actually went through (thank-you page, "application submitted/received", confirmation number) and finish with: SUBMITTED. If you deliberately chose not to submit because something looks wrong or uncertain, leave the page open on the review step and finish with: READY_FOR_REVIEW: <what stopped you>.
+7. {step7}
 8. Anything else fatal -> FAILED: <short reason>
 
 RULES
 - The FINAL line of your answer must be exactly one status line: SUBMITTED or READY_FOR_REVIEW or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ...
-- Submitting the application yourself is allowed and expected (step 7). Never type passwords, 2FA codes, or payment details - not even if a page asks. Google SSO with the already-signed-in Chrome account is allowed (step 2); creating email+password accounts is not.
+- {submit_rule} Never type passwords, 2FA codes, or payment details - not even if a page asks. Google SSO with the already-signed-in Chrome account is allowed (step 2); creating email+password accounts is not.
 - Every fact you enter comes ONLY from the data sources. Never invent, guess, or embellish - a submitted application with a wrong fact is worse than one that stops. When unsure about a material answer, prefer READY_FOR_REVIEW over submitting.
 - Stick to this one application - no unrelated browsing, no other tabs' data.
 """
@@ -351,14 +385,17 @@ def codex_line_filter(line):
 
 # Codex session ids per job, so a stopped run (login/CAPTCHA/missing answer)
 # can be resumed with full context. Persisted across server restarts.
+# Entry: {"sid": <codex session id>, "mode": "review"|"auto"} - the mode sticks
+# for resumes. Old files stored a bare sid string (upgraded to review on load).
 SESSION_RE = re.compile(r"session id: ([0-9a-f][0-9a-f-]{15,})")
 SESSIONS_FILE = ROOT / "output" / ".submit_sessions.json"
 
 
 def _load_sessions():
     try:
-        return {int(k): v for k, v in
-                json.loads(SESSIONS_FILE.read_text(encoding="utf-8-sig")).items()}
+        raw = json.loads(SESSIONS_FILE.read_text(encoding="utf-8-sig"))
+        return {int(k): (v if isinstance(v, dict) else {"sid": v, "mode": "review"})
+                for k, v in raw.items()}
     except Exception:  # noqa: BLE001
         return {}
 
@@ -366,9 +403,9 @@ def _load_sessions():
 sub_sessions = _load_sessions()
 
 
-def save_session(job_id, sid):
+def save_session(job_id, sid, mode):
     with lock:
-        sub_sessions[job_id] = sid
+        sub_sessions[job_id] = {"sid": sid, "mode": mode}
         try:
             SESSIONS_FILE.write_text(
                 json.dumps({str(k): v for k, v in sub_sessions.items()}),
@@ -377,12 +414,26 @@ def save_session(job_id, sid):
             pass
 
 
-CONTINUE_PROMPT = f"""The human says they completed the required action in Chrome (login / CAPTCHA solved / a missing answer was added to application-answers.md - re-read that file if your blocker was a missing answer). Re-check the open application page in Chrome and continue exactly where you stopped.
+def build_continue_prompt(mode="review"):
+    if mode == "auto":
+        finish = ("Once the form is complete and every field verified against "
+                  "the data sources, click the final Submit/Send/Apply button "
+                  "YOURSELF (full-auto mode, user pre-approved for this run), "
+                  "confirm the submission went through, and report SUBMITTED.")
+    else:
+        finish = ("Once the form is complete and every field verified against "
+                  "the data sources, STOP at the final review step WITHOUT "
+                  "clicking Submit/Send/Apply - the USER clicks it (review "
+                  "mode). Then watch the page (re-check every ~30 seconds, up "
+                  "to 10 minutes): if the submission confirmation appears, "
+                  "report SUBMITTED; if 10 minutes pass, report "
+                  "READY_FOR_REVIEW: form complete, waiting for your Submit click.")
+    return f"""The human says they completed the required action in Chrome (login / CAPTCHA solved / a missing answer was added to application-answers.md - re-read that file if your blocker was a missing answer). Re-check the open application page in Chrome and continue exactly where you stopped.
 
-Current permissions (full-auto mode, user pre-approved):
+Current permissions:
 - Google SSO with the Chrome profile's signed-in account ({ACCOUNT_EMAIL}) is allowed, including first-time portal account creation and basic identity consent (name, email, profile picture, openid).
 - Answer required questions yourself when the truthful answer is clearly inferable from the data sources; stop with NEEDS_INPUT only for salary / visa / security-clearance / legal questions not covered there.
-- Once the form is complete and every field verified against the data sources, click the final Submit/Send/Apply button YOURSELF, confirm the submission went through, and report SUBMITTED.
+- {finish}
 - Still never type passwords, 2FA codes, or payment details; stop for CAPTCHA; never approve broad OAuth scopes (contacts, Drive, Gmail, calendar); never invent facts - when unsure, prefer READY_FOR_REVIEW.
 
 Same finish protocol: the FINAL line of your answer must be exactly one of: SUBMITTED or READY_FOR_REVIEW or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ..."""
@@ -398,7 +449,7 @@ STATUS_TOKENS = [
 ]
 
 
-def run_submit(job_id, resume=False):
+def run_submit(job_id, resume=False, mode="review"):
     job = get_job_row(job_id)
     if not job:
         return set_sub(job_id, "error", f"job {job_id} not found")
@@ -414,25 +465,28 @@ def run_submit(job_id, resume=False):
         if not codex:
             return set_sub(job_id, "error", "codex.exe not found (OpenAI Codex app installed?)")
         if resume:
-            sid = sub_sessions.get(job_id)
-            if not sid:
+            entry = sub_sessions.get(job_id)
+            if not entry:
                 return set_sub(job_id, "error",
                                "אין ריצת Codex קודמת למשרה הזאת - הרץ 🚀 הגש רגיל")
+            mode = entry.get("mode", "review")  # a resume keeps its run's mode
             cmd = [codex, "exec", "resume", "--skip-git-repo-check",
-                   "-o", str(lastmsg), sid, CONTINUE_PROMPT]
+                   "-o", str(lastmsg), entry["sid"], build_continue_prompt(mode)]
         else:
             cmd = [codex, "exec", "--skip-git-repo-check", "-C", str(ROOT),
-                   "-o", str(lastmsg), build_submit_prompt(job)]
+                   "-o", str(lastmsg), build_submit_prompt(job, mode)]
 
     if not submit_running.acquire(blocking=False):
         return set_sub(job_id, "busy", "הגשה אחרת רצה כרגע - חכה שתסתיים")
     verb = "המשך הגשה" if resume else "הגשת מועמדות"
+    if mode == "auto":
+        verb += " (אוטומטי)"
     t = new_task("codex", job_id, f"{verb} למשרה #{job_id} ({job['company']})")
 
     def filt(line):
         m = SESSION_RE.search(line)
         if m:
-            save_session(job_id, m.group(1))
+            save_session(job_id, m.group(1), mode)
         return codex_line_filter(line)
     try:
         lastmsg.unlink(missing_ok=True)
@@ -475,9 +529,10 @@ def run_submit(job_id, resume=False):
 
 # ---------------------------------------------------------------- batch pipeline
 # "הגש נבחרות": phase 1 generates a CV for every checked fresh job that lacks one,
-# phase 2 chains Codex form-filling runs one at a time (full-auto: Codex
-# submits each application itself; it only stops for passwords/CAPTCHA/
-# questions it can't answer truthfully from the data sources).
+# phase 2 chains Codex form-filling runs one at a time. submit_mode "review"
+# (default): Codex stops before each final Submit and the user clicks it;
+# "auto": Codex submits each application itself. Either way it stops for
+# passwords/CAPTCHA/questions it can't answer truthfully from the data sources.
 batch_state = {"status": "idle"}
 batch_stop = threading.Event()
 
