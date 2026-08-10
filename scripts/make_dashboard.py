@@ -38,6 +38,7 @@ IC_SPARK = _svg("M12 2l1.9 5.6L19.5 9.5l-5.6 1.9L12 17l-1.9-5.6L4.5 9.5l5.6-1.9L
 IC_GRID = _svg("M3 3h8v8H3V3zm10 0h8v5h-8V3zM3 13h8v8H3v-8zm10-3h8v11h-8V10z")
 IC_BOX = _svg("M3 4h18v4H3V4zm2 6h14v10H5V10zm4 3h6v2H9v-2z")
 IC_USER = _svg("M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5z")
+IC_BOLT = _svg("M7 2v11h3v9l7-12h-4l4-8H7z")
 
 
 def parse_d(s):
@@ -131,7 +132,11 @@ def build(jobs, archived=0):
         submit_btn = ""
         continue_btn = ""
         if j["cv"] and j["status"] not in ("הוגש", "ראיון"):
-            submit_btn = f'<button class="btn primary" onclick="submitJob({j["id"]}, this)" title="Codex ממלא ומגיש לבד - עוצר רק על סיסמה / CAPTCHA / שאלה שאין לה תשובה">הגש מועמדות</button>'
+            # single button; its label/behavior follow the sidebar mode switch
+            submit_btn = (
+                f'<button class="btn primary sub-go" onclick="submitJob({j["id"]}, this)" '
+                f'title="Codex ממלא ועוצר לפני השליחה - אתה בודק בכרום ולוחץ Submit בעצמך">הגש מועמדות</button>'
+            )
             if j["id"] in resumable:
                 continue_btn = f'<button class="btn outline" onclick="continueSubmit({j["id"]}, this)" title="ממשיך את ריצת ה-Codex הקודמת מאיפה שנעצרה">המשך</button>'
         score_cls = min(int(j["score"] or 0), 10)
@@ -248,6 +253,16 @@ def build(jobs, archived=0):
   .bigbtn.sec:hover {{ background:var(--softer); }}
   .bigbtn:disabled {{ opacity:.55; cursor:default; }}
   .bigbtn.dim {{ opacity:.55; }}
+  .swrow {{ display:flex; align-items:center; gap:8px; cursor:pointer; padding:0 2px 2px; user-select:none; }}
+  .swrow input {{ display:none; }}
+  .sw {{ width:34px; height:19px; border-radius:10px; background:var(--line2); position:relative;
+         transition:background .15s; flex:none; }}
+  .sw::after {{ content:""; position:absolute; top:2px; right:2px; width:15px; height:15px; border-radius:50%;
+                background:#fff; transition:transform .15s; box-shadow:0 1px 2px rgba(0,0,0,.25); }}
+  .swrow input:checked ~ .sw {{ background:var(--pri); }}
+  .swrow input:checked ~ .sw::after {{ transform:translateX(-15px); }}
+  .swtxt {{ font-size:12.5px; font-weight:600; color:var(--mut); display:flex; align-items:center; gap:6px; }}
+  .swrow input:checked ~ .swtxt {{ color:var(--pri); }}
   .sidefoot {{ color:var(--mut); font-size:11px; line-height:1.7; padding:12px 10px 0; }}
   main {{ margin-right:250px; padding:22px 26px 120px; }}
   .wrap {{ max-width:960px; margin:0 auto; }}
@@ -520,16 +535,36 @@ function selChanged() {{
   if (full) {{ full.textContent = n ? `הגש נבחרות (${{n}})` : "הגש נבחרות"; full.classList.toggle("dim", !n); }}
   if (cv) {{ cv.textContent = n ? `CV לנבחרות (${{n}})` : "CV לנבחרות"; cv.classList.toggle("dim", !n); }}
 }}
+function subMode() {{
+  const el = document.getElementById("submode");
+  return el && el.checked ? "auto" : "review";
+}}
+function applyMode() {{
+  const auto = subMode() === "auto";
+  document.querySelectorAll(".sub-go").forEach(b => {{
+    if (b.disabled) return;
+    const idle = b.textContent === "הגש מועמדות" || b.textContent === "הגש אוטומטית";
+    if (!idle) return;
+    b.textContent = auto ? "הגש אוטומטית" : "הגש מועמדות";
+    if (b.dataset.orig) b.dataset.orig = b.textContent;
+    b.title = auto
+      ? "אוטומטי מלא: Codex ממלא וגם לוחץ Submit בעצמו (יישאל אישור קטן)"
+      : "Codex ממלא ועוצר לפני השליחה - אתה בודק בכרום ולוחץ Submit בעצמך";
+  }});
+}}
 async function startBatch(mode) {{
   const ids = selIds();
   if (!ids.length) return toast("סמן קודם משרות עם התיבה בכרטיס - אין הרצה על הכל");
   if (!(await serverUp())) return serverDownMsg();
   const who = ids.length + " המשרות שסימנת";
+  const sm = subMode();
   const msg = mode === "full"
-    ? "להריץ את הצינור על " + who + "?\\n1) CV למי שאין\\n2) Codex ימלא ויגיש טופס אחרי טופס לבד\\nעוצר רק על התחברות / CAPTCHA / שאלה שאין לה תשובה."
+    ? (sm === "auto"
+        ? "להריץ את הצינור על " + who + "?\\n1) CV למי שאין\\n2) אוטומטי מלא: Codex ימלא ויגיש טופס אחרי טופס לבד\\nעוצר רק על התחברות / CAPTCHA / שאלה שאין לה תשובה."
+        : "להריץ את הצינור על " + who + "?\\n1) CV למי שאין\\n2) Codex ימלא טופס אחרי טופס ויעצור לפני כל שליחה - אתה בודק בכרום ולוחץ Submit\\nהישאר ליד המחשב.")
     : "ליצור CV עבור " + who + " (רק למי שאין)? רץ לבד ברקע, אפשר ללכת.";
   if (!confirm(msg)) return;
-  const q = "&ids=" + ids.join(",");
+  const q = "&ids=" + ids.join(",") + (mode === "full" ? "&submit_mode=" + sm : "");
   try {{ await fetch(BASE + "/batch?mode=" + mode + q); }}
   catch (e) {{ return toast("השרת לא מגיב"); }}
   toast(mode === "full" ? "הצינור יצא לדרך" : "יצירת ה-CV התחילה");
@@ -629,7 +664,7 @@ async function pollSubmit(id, btn, orig) {{
         btn.textContent = "הגשתי - עדכן סטטוס";
         btn.disabled = false;
         btn.onclick = () => setStatus(id, "הוגש", btn);
-        toast("Codex מילא אבל בחר לא להגיש (משהו לא היה ודאי) - בדוק בכרום, הגש, ולחץ כאן");
+        toast("הטופס מלא ומחכה לך בכרום - בדוק ולחץ Submit בעצמך, ואז לחץ 'הגשתי - עדכן סטטוס'");
         return;
       }}
       if (s.status === "login") return contBtn("נדרשת התחברות - התחבר בכרום בדף הפתוח, ואז לחץ המשך");
@@ -646,12 +681,15 @@ async function pollSubmit(id, btn, orig) {{
   }}
 }}
 async function submitJob(id, btn) {{
+  const mode = subMode();
+  if (mode === "auto" &&
+      !confirm("הגשה אוטומטית מלאה: Codex ימלא וגם ילחץ Submit בלי בדיקה שלך. להמשיך?")) return;
   if (!(await serverUp())) return serverDownMsg();
   const orig = btn.dataset.orig || btn.textContent;
   btn.dataset.orig = orig;
   btn.disabled = true;
-  btn.textContent = "Codex ממלא...";
-  try {{ await fetch(BASE + "/submit?id=" + id); }}
+  btn.textContent = mode === "auto" ? "Codex מגיש..." : "Codex ממלא...";
+  try {{ await fetch(BASE + "/submit?id=" + id + "&mode=" + mode); }}
   catch (e) {{ btn.textContent = orig; btn.disabled = false; return toast("השרת לא מגיב"); }}
   await pollSubmit(id, btn, orig);
 }}
@@ -875,6 +913,16 @@ function cbCopyFallback(txt, done) {{
 cbPoll();
 selChanged();
 batchPoll();
+(() => {{
+  const el = document.getElementById("submode");
+  if (!el) return;
+  el.checked = localStorage.getItem("submode") === "auto";
+  el.onchange = () => {{
+    localStorage.setItem("submode", el.checked ? "auto" : "review");
+    applyMode();
+  }};
+  applyMode();
+}})();
 </script>
 </body>
 </html>"""
@@ -924,6 +972,16 @@ SUB_CSS = """
   .bigbtn.sec:hover { background:var(--softer); }
   .bigbtn:disabled { opacity:.55; cursor:default; }
   .bigbtn.dim { opacity:.55; }
+  .swrow { display:flex; align-items:center; gap:8px; cursor:pointer; padding:0 2px 2px; user-select:none; }
+  .swrow input { display:none; }
+  .sw { width:34px; height:19px; border-radius:10px; background:var(--line2); position:relative;
+        transition:background .15s; flex:none; }
+  .sw::after { content:""; position:absolute; top:2px; right:2px; width:15px; height:15px; border-radius:50%;
+               background:#fff; transition:transform .15s; box-shadow:0 1px 2px rgba(0,0,0,.25); }
+  .swrow input:checked ~ .sw { background:var(--pri); }
+  .swrow input:checked ~ .sw::after { transform:translateX(-15px); }
+  .swtxt { font-size:12.5px; font-weight:600; color:var(--mut); display:flex; align-items:center; gap:6px; }
+  .swrow input:checked ~ .swtxt { color:var(--pri); }
   .sidefoot { color:var(--mut); font-size:11px; line-height:1.7; padding:12px 10px 0; }
   main { margin-right:250px; padding:22px 26px 60px; }
   .wrap { max-width:900px; margin:0 auto; }
@@ -979,8 +1037,13 @@ def sidebar_html(active, jobs_n, archived_n):
   </nav>
   <div class="sidegrow"></div>
   <div class="sideact">
+    <label class="swrow" title="כבוי: Codex ממלא ועוצר - אתה בודק בכרום ולוחץ Submit. דלוק: Codex גם מגיש בעצמו. חל על כפתור ההגשה בכרטיס וגם על הגש נבחרות">
+      <input type="checkbox" id="submode">
+      <span class="sw"></span>
+      <span class="swtxt">{IC_BOLT} Codex מגיש לבד</span>
+    </label>
     <button class="bigbtn dim" id="batch-full" onclick="startBatch('full')"
-            title="רק למשרות שסימנת עם התיבה בכרטיס: יוצר CV למי שאין, ואז Codex ממלא ומגיש טופס אחרי טופס לבד">הגש נבחרות</button>
+            title="רק למשרות שסימנת עם התיבה בכרטיס: יוצר CV למי שאין, ואז Codex ממלא טופס אחרי טופס - מצב השליחה לפי המתג שלמעלה">הגש נבחרות</button>
     <button class="bigbtn sec dim" id="batch-cv" onclick="startBatch('cv')"
             title="יצירת CV רק למשרות שסימנת (למי שאין) - רץ לבד, אפשר ללכת">CV לנבחרות</button>
   </div>
@@ -1001,6 +1064,12 @@ function startBatch(mode) {
   toast("הבחירה נעשית בלוח - סמן שם משרות ואז הפעל");
   setTimeout(() => location.href = "dashboard.html", 900);
 }
+(() => {
+  const el = document.getElementById("submode");
+  if (!el) return;
+  el.checked = localStorage.getItem("submode") === "auto";
+  el.onchange = () => localStorage.setItem("submode", el.checked ? "auto" : "review");
+})();
 """
 
 

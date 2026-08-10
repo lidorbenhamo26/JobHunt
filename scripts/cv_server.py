@@ -565,9 +565,10 @@ def batch_add(name, val):
         batch_state.setdefault(name, []).append(val)
 
 
-def run_batch(mode, only_ids=None):
+def run_batch(mode, only_ids=None, submit_mode="review"):
     """mode 'cv' = CVs only; 'full' = CVs then chained Codex submissions.
-    only_ids: restrict the run to these job ids (checkbox selection)."""
+    only_ids: restrict the run to these job ids (checkbox selection).
+    submit_mode: 'review' = user clicks each Submit; 'auto' = Codex submits."""
     targets = batch_targets(only_ids)
     set_batch(status="running", mode=mode, phase="cv", total=len(targets),
               cv_done=[], cv_failed=[], submitted=[], ready=[], blocked=[],
@@ -599,7 +600,7 @@ def run_batch(mode, only_ids=None):
                 break
             set_batch(current=j["id"], phase="submit")
             task_log(t, f"הגשה {i}/{len(subq)}: #{j['id']} {j['company']}")
-            run_submit(j["id"])
+            run_submit(j["id"], mode=submit_mode)
             with lock:
                 st = subs.get(j["id"], {}).get("status")
             if st == "submitted":
@@ -896,9 +897,13 @@ class Handler(BaseHTTPRequestHandler):
                                         "detail": t["detail"]})
 
         if u.path == "/batch":
-            mode = parse_qs(u.query).get("mode", ["full"])[0]
+            q = parse_qs(u.query)
+            mode = q.get("mode", ["full"])[0]
             if mode not in ("cv", "full"):
                 return self._json(400, {"error": "bad mode"})
+            submit_mode = q.get("submit_mode", ["review"])[0]
+            if submit_mode not in ("review", "auto"):
+                return self._json(400, {"error": "bad submit_mode"})
             ids_raw = parse_qs(u.query).get("ids", [""])[0]
             only_ids = None
             if ids_raw:
@@ -915,7 +920,7 @@ class Handler(BaseHTTPRequestHandler):
                 if batch_state.get("status") == "running":
                     return self._json(200, {"status": "running"})
             batch_stop.clear()
-            threading.Thread(target=run_batch, args=(mode, only_ids),
+            threading.Thread(target=run_batch, args=(mode, only_ids, submit_mode),
                              daemon=True).start()
             return self._json(200, {"status": "running"})
 
@@ -951,12 +956,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, jobs.get(job_id, {"status": "unknown"}))
 
         if u.path == "/submit":
+            mode = parse_qs(u.query).get("mode", ["review"])[0]
+            if mode not in ("review", "auto"):
+                return self._json(400, {"error": "bad mode"})
             with lock:
                 cur = subs.get(job_id)
                 if cur and cur["status"] == "running":
                     return self._json(200, {"status": "running"})
                 subs[job_id] = {"status": "running", "detail": ""}
-            threading.Thread(target=run_submit, args=(job_id,), daemon=True).start()
+            threading.Thread(target=run_submit, args=(job_id, False, mode),
+                             daemon=True).start()
             return self._json(200, {"status": "running"})
 
         if u.path == "/submit-continue":
