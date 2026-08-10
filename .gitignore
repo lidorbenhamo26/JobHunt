@@ -1,0 +1,16 @@
+# Personal data and generated output - never leaves this machine
+jobs.xlsx
+~$*.xlsx
+master-cv.json
+profile.md
+application-answers.md
+SOURCES.md
+*.html
+output/
+transcript/
+.last-full-scan
+.claude/
+
+# Python
+__pycache__/
+*.pyc
