@@ -14,6 +14,11 @@ Endpoints:
                           mode=auto: Codex clicks Submit itself (full-auto).
   GET /submit-status?id=N -> {"status": "running"|"ready"|"login"|"captcha"|
                               "needs_input"|"error", "detail": "..."}
+  GET /review?id=N     -> field-by-field summary Codex wrote before waiting
+                          (review mode), for remote/phone review
+  GET /submit-approve?id=N -> user approved the summary: signal the waiting
+                          Codex run (sentinel file) or, if it already timed
+                          out, resume the session to click Submit
 
 Start: start-cv-server.bat (or: python scripts\cv_server.py)
 Set CV_DRYRUN=1 to test the plumbing without calling Claude/Codex.
@@ -268,6 +273,21 @@ submit_running = threading.Lock()  # one Chrome-driving run at a time
 def set_sub(job_id, status, detail=""):
     with lock:
         subs[job_id] = {"status": status, "detail": detail}
+
+
+def review_file(job_id):
+    """Field-by-field summary Codex writes before waiting (review mode)."""
+    return ROOT / "output" / f".review_{job_id}.txt"
+
+
+def approve_file(job_id):
+    """Sentinel the dashboard touches when the user approves remotely."""
+    return ROOT / "output" / f".review_approve_{job_id}"
+
+
+def shot_file(job_id):
+    """Screenshot of the completed form (best effort, review mode)."""
+    return ROOT / "output" / f".review_{job_id}.png"
 
 
 def find_codex():
