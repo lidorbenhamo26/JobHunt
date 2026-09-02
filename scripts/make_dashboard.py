@@ -5,7 +5,7 @@ Usage: python make_dashboard.py
 RTL Hebrew dashboard, Stitch-inspired design (Material-ish, self-contained CSS,
 no CDN so file:// works offline): big score badge, corner ribbons, AI-insight
 box, sticky toolbar (search / sort / filters), "הגש הכל" batch pipeline,
-auto-archive pass on every rebuild, live task console. Light + dark theme.
+auto-archive pass on every rebuild, live task console. Light theme only.
 Icons are inline SVG (Material-style) - no decorative emoji, per user
 preference.
 """
@@ -39,6 +39,61 @@ IC_GRID = _svg("M3 3h8v8H3V3zm10 0h8v5h-8V3zM3 13h8v8H3v-8zm10-3h8v11h-8V10z")
 IC_BOX = _svg("M3 4h18v4H3V4zm2 6h14v10H5V10zm4 3h6v2H9v-2z")
 IC_USER = _svg("M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5z")
 IC_BOLT = _svg("M7 2v11h3v9l7-12h-4l4-8H7z")
+IC_DOC = _svg("M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z")
+IC_SEARCH = _svg("M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z")
+
+
+# On-demand scan controls. Shared verbatim by the dashboard and the sub-pages,
+# so it may only depend on BASE + toast() (both exist on every page).
+SCAN_JS = """
+let scanWas = null;
+async function runScan(mode) {
+  const msg = mode === "cheap"
+    ? "להריץ סריקה מהירה עכשיו?\\n\\nNVIDIA / Intel / Amazon / לינקדאין (חיפה והצפון) / ג'וב מאסטר,\\nרק משרות מ-72 השעות האחרונות. כמה דקות, רץ ברקע."
+    : "להריץ סריקה מלאה עכשיו?\\n\\nכל המקורות שנגישים ב-HTTP, חלון של 7 ימים - לוקח יותר זמן.\\n\\nשים לב: מקורות שדורשים דפדפן (מיקרוסופט, גוגל, אפל, צ'ק פוינט, דרושים, אולג'ובס, וואטסאפ) לא רצים מכאן, ולכן התאריך של הסריקה המלאה המתוזמנת לא מתעדכן - היא עדיין תרוץ כרגיל.";
+  if (!confirm(msg)) return;
+  let s;
+  try {
+    s = await (await fetch(BASE + "/scan?mode=" + mode, { signal: AbortSignal.timeout(5000) })).json();
+  } catch (e) {
+    return toast("השרת המקומי כבוי - דאבל-קליק על start-cv-server.bat בתיקיית JobHunt ונסה שוב");
+  }
+  toast(s.detail ? s.detail
+        : (mode === "cheap" ? "סריקה מהירה יצאה לדרך - ההתקדמות בקונסול המשימות למטה"
+                            : "סריקה מלאה יצאה לדרך - ההתקדמות בקונסול המשימות למטה"));
+  scanPoll();
+}
+async function scanPoll() {
+  let s;
+  try { s = await (await fetch(BASE + "/scan-status", { signal: AbortSignal.timeout(2500) })).json(); }
+  catch (e) { return; }
+  const run = s.status === "running";
+  for (const id of ["scan-cheap", "scan-full"]) {
+    const b = document.getElementById(id);
+    if (b) b.disabled = run;
+  }
+  const el = document.getElementById("scanst");
+  if (el) {
+    el.className = "scanst" + (run ? " run" : (s.status === "error" ? " err" : ""));
+    if (run) {
+      const mins = s.started ? Math.max(0, Math.round((Date.now() / 1000 - s.started) / 60)) : 0;
+      el.textContent = (s.mode === "full" ? "סריקה מלאה רצה" : "סריקה מהירה רצה") + " · " + mins + " דק'";
+    } else if (s.status === "done") {
+      el.textContent = "הסריקה הסתיימה";
+    } else if (s.status === "error") {
+      el.textContent = "הסריקה נכשלה: " + String(s.detail || "").slice(0, 90);
+    } else {
+      el.textContent = "";
+    }
+  }
+  if (run) { scanWas = s.status; return setTimeout(scanPoll, 5000); }
+  if (scanWas === "running" && s.status === "done") {
+    toast("הסריקה הסתיימה - מרענן את הלוח");
+    setTimeout(() => location.reload(), 1800);
+  }
+  scanWas = s.status;
+}
+"""
 
 
 def parse_d(s):
@@ -124,7 +179,7 @@ def build(jobs, archived=0):
         cv_html = ""
         if j["cv"]:
             # Relative path - opens the PDF straight off disk from file://.
-            cv_html = f'<a class="btn okghost" href="output/{html.escape(str(j["cv"]), quote=True)}" target="_blank">CV מוכן</a>'
+            cv_html = f'<a class="btn cvready" href="output/{html.escape(str(j["cv"]), quote=True)}" target="_blank" title="פתיחת ה-CV המוכן (PDF)">{IC_DOC} CV מוכן</a>'
         status_opts = "".join(
             f'<option value="{s}"{" selected" if j["status"] == s else ""}>{s}</option>'
             for s in STATUS_COLORS
@@ -139,33 +194,42 @@ def build(jobs, archived=0):
             )
             if j["id"] in resumable:
                 continue_btn = f'<button class="btn outline" onclick="continueSubmit({j["id"]}, this)" title="ממשיך את ריצת ה-Codex הקודמת מאיפה שנעצרה">המשך</button>'
+        # CV exists -> regenerate is a secondary action (outline), not the loud navy CTA
+        if j["cv"]:
+            gen_btn = (f'<button class="btn outline" onclick="genCV({j["id"]}, this)" '
+                       f'title="יצירה מחדש של ה-CV (ידרוס את הקיים)">הפק CV מחדש</button>')
+        else:
+            gen_btn = f'<button class="btn navy" onclick="genCV({j["id"]}, this)">הפק קורות חיים</button>'
         score_cls = min(int(j["score"] or 0), 10)
+        # search haystack: content fields only, so typing "cv" / "הגש" won't
+        # match every card via its button labels
+        blob = " ".join(str(j[k]) for k in ("company", "title", "reason", "location"))
+        blob = f'{blob} #{j["id"]}'.lower()
         cards.append(f"""
     <div class="card{' has-rib' if ribbon else ''}" id="job-{j['id']}" data-status="{html.escape(str(j['status']))}"
-         data-score="{j['score'] or 0}" data-date="{html.escape(j['date'])}">
+         data-score="{j['score'] or 0}" data-date="{html.escape(j['date'])}" data-search="{html.escape(blob, quote=True)}">
       {ribbon}
       <div class="score s{score_cls}"><span class="sn">{j['score']}</span><span class="sl">התאמה</span></div>
       <div class="body">
         <div class="top">
-          <input type="checkbox" class="selbox" data-id="{j['id']}" onchange="selChanged()" title="בחירה להגשה/CV מרובים"{' disabled' if j['status'] in ('הוגש', 'ראיון') else ''}>
+          <input type="checkbox" class="selbox" data-id="{j['id']}" onchange="selChanged()" title="בחירה להגשה/CV מרובים" aria-label="בחירה להגשה או CV מרובים"{' disabled' if j['status'] in ('הוגש', 'ראיון') else ''}>
           <span class="company">{html.escape(str(j['company']))}</span>
-          <select class="badge badge-sel" style="background:{bg};color:{fg}" onchange="setStatus({j['id']}, this.value, this)" title="שינוי סטטוס">{status_opts}</select>
+          <select class="badge badge-sel" style="background:{bg};color:{fg}" onchange="setStatus({j['id']}, this.value, this)" title="שינוי סטטוס" aria-label="סטטוס המשרה">{status_opts}</select>
           <span class="meta">{IC_PIN} {html.escape(str(j['location']))}</span>
           <span class="dot">•</span>
           <span class="meta">{date_meta}</span>
           {sub_meta}
           <span class="dot">•</span>
           <span class="meta mut">#{j['id']}</span>
+          <span class="toplinks">{cv_html}<a class="btn outline iconb" href="{html.escape(str(j['link']), quote=True)}" target="_blank" title="פתיחת המשרה במקור" aria-label="פתיחת המשרה במקור">{IC_LINK}</a></span>
         </div>
         <div class="title">{html.escape(str(j['title']))}</div>
         <div class="insight" onclick="this.classList.toggle('open')" title="קליק להרחבה"><span class="ri">{IC_SPARK}</span><span class="reason">{html.escape(str(j['reason']))}</span></div>
         <div class="actions">
-          <button class="btn navy" onclick="genCV({j['id']}, this)">הפק קורות חיים</button>
+          {gen_btn}
           {submit_btn}
-          {cv_html}
-          <a class="btn outline iconb" href="{html.escape(str(j['link']), quote=True)}" target="_blank" title="פתיחת המשרה במקור">{IC_LINK}</a>
           {continue_btn}
-          <button class="btn del iconb" onclick="delJob({j['id']}, this)" title="מחיקת המשרה מהטבלה">{IC_TRASH}</button>
+          <button class="btn del iconb" onclick="delJob({j['id']}, this)" title="מחיקת המשרה מהטבלה" aria-label="מחיקת המשרה מהטבלה">{IC_TRASH}</button>
         </div>
       </div>
     </div>""")
@@ -223,6 +287,7 @@ def build(jobs, archived=0):
   html {{ color-scheme: light; }}
   body {{ font-family:"Work Sans","Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--ink); }}
   .ic {{ width:1em; height:1em; vertical-align:-0.13em; flex-shrink:0; }}
+  :focus-visible {{ outline:2px solid var(--pri); outline-offset:2px; }}
   /* ---- layout: fixed sidebar (right, RTL) + main ---- */
   aside {{ position:fixed; top:0; right:0; bottom:0; width:250px; z-index:50;
            background:var(--card); border-left:1px solid var(--line);
@@ -232,7 +297,7 @@ def build(jobs, archived=0):
   .userbox {{ display:flex; flex-direction:column; gap:2px; background:var(--softer);
               border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin-bottom:16px; }}
   .uname {{ font-weight:700; font-size:14px; }}
-  .urole {{ color:var(--mut); font-size:11.5px; }}
+  .urole {{ color:var(--mut); font-size:12px; }}
   nav.side {{ display:flex; flex-direction:column; gap:4px; }}
   .navi {{ display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px;
            text-decoration:none; color:var(--mut); font-size:13.5px; font-weight:600;
@@ -240,7 +305,7 @@ def build(jobs, archived=0):
   .navi:hover {{ background:var(--softer); }}
   .navi.act {{ background:var(--pri); color:var(--pri-ink); }}
   .navi .cnt {{ margin-right:auto; background:var(--soft); border-radius:9999px; padding:1px 8px;
-                font-size:11px; color:var(--mut); }}
+                font-size:12px; color:var(--mut); }}
   .navi.act .cnt {{ background:rgba(255,255,255,.2); color:var(--pri-ink); }}
   .sidegrow {{ flex:1; }}
   .sideact {{ display:flex; flex-direction:column; gap:8px; }}
@@ -263,7 +328,36 @@ def build(jobs, archived=0):
   .swrow input:checked ~ .sw::after {{ transform:translateX(-15px); }}
   .swtxt {{ font-size:12.5px; font-weight:600; color:var(--mut); display:flex; align-items:center; gap:6px; }}
   .swrow input:checked ~ .swtxt {{ color:var(--pri); }}
-  .sidefoot {{ color:var(--mut); font-size:11px; line-height:1.7; padding:12px 10px 0; }}
+  /* on-demand job scan (same routine the scheduled task runs) */
+  .scangrp {{ border-top:1px solid var(--line); margin-top:4px; padding-top:10px; }}
+  .scanh {{ display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700;
+            color:var(--mut); padding:0 2px 8px; }}
+  .scanrow {{ display:flex; gap:8px; }}
+  .scanrow .bigbtn {{ flex:1; padding:10px 6px; font-size:12.5px; }}
+  .bigbtn.scan {{ background:var(--navy); color:var(--navy-ink); }}
+  .bigbtn.scan:hover {{ background:var(--navy-h); }}
+  .bigbtn.sec.scan {{ background:var(--card); color:var(--ink); border:1px solid var(--line2); }}
+  .bigbtn.sec.scan:hover {{ background:var(--softer); }}
+  .scanst {{ font-size:11.5px; color:var(--mut); line-height:1.6; padding:7px 2px 0; }}
+  .scanst.run {{ color:var(--pri); font-weight:600; }}
+  .scanst.err {{ color:var(--err); }}
+  .review-box {{ margin-top:10px; border:1px solid var(--line2); border-radius:12px;
+                 background:var(--softer); padding:10px 12px; }}
+  .review-box .rvh {{ font-size:12px; font-weight:700; margin-bottom:8px; }}
+  .review-box pre {{ margin:0 0 8px; max-height:260px; overflow:auto; white-space:pre-wrap;
+                     font-size:11.5px; line-height:1.5; background:var(--card);
+                     border:1px solid var(--line); border-radius:8px; padding:8px 10px; }}
+  .review-box .rvimg {{ display:block; max-width:100%; max-height:320px; object-fit:contain;
+                        border:1px solid var(--line); border-radius:8px; margin-bottom:8px;
+                        cursor:zoom-in; }}
+  .rvb {{ display:flex; gap:8px; }}
+  .ans-box .ans-q {{ font-size:12.5px; font-weight:600; margin-bottom:8px; background:var(--card);
+                     border:1px solid var(--line); border-radius:8px; padding:8px 10px; }}
+  .ans-box textarea {{ width:100%; box-sizing:border-box; resize:vertical; min-height:44px;
+                       font:inherit; font-size:12.5px; background:var(--card); color:inherit;
+                       border:1px solid var(--line); border-radius:8px; padding:8px 10px;
+                       margin-bottom:8px; }}
+  .sidefoot {{ color:var(--mut); font-size:12px; line-height:1.7; padding:12px 10px 0; }}
   main {{ margin-right:250px; padding:22px 26px 120px; }}
   .wrap {{ max-width:960px; margin:0 auto; }}
   h1 {{ font-size:24px; font-weight:700; letter-spacing:-.02em; }}
@@ -289,7 +383,7 @@ def build(jobs, archived=0):
         padding:8px 14px; font-size:12.5px; cursor:pointer; font-family:inherit; box-shadow:var(--shadow);
         transition:transform .08s; }}
   .f:active {{ transform:scale(.95); }}
-  .f .cnt {{ background:var(--soft); border-radius:9999px; padding:1px 7px; font-size:11px; color:var(--mut); }}
+  .f .cnt {{ background:var(--soft); border-radius:9999px; padding:1px 7px; font-size:12px; color:var(--mut); }}
   .f.on {{ background:var(--navy); color:var(--navy-ink); border-color:var(--navy); }}
   .f.on .cnt {{ background:rgba(255,255,255,.18); color:var(--navy-ink); }}
   /* ---- batch progress ---- */
@@ -319,11 +413,11 @@ def build(jobs, archived=0):
   /* ---- cards ---- */
   .card {{ position:relative; display:flex; gap:14px; background:var(--card); border:1px solid var(--line);
            border-radius:12px; padding:16px; margin-bottom:12px; box-shadow:var(--shadow);
-           scroll-margin-top:160px; transition:box-shadow .15s; }}
-  .card:hover {{ box-shadow:var(--shadow-hover); }}
+           scroll-margin-top:160px; transition:box-shadow .15s, transform .15s; }}
+  .card:hover {{ box-shadow:var(--shadow-hover); transform:translateY(-1px); }}
   .card:target {{ outline:2px solid var(--pri); }}
   .card.has-rib {{ padding-top:38px; }}
-  .rib {{ position:absolute; top:8px; left:8px; font-size:11px; font-weight:700; letter-spacing:.02em;
+  .rib {{ position:absolute; top:8px; left:8px; font-size:12px; font-weight:700; letter-spacing:.02em;
           border-radius:9999px; padding:3px 12px; box-shadow:var(--shadow); }}
   .rib-y {{ background:var(--rib-y-bg); color:var(--rib-y-ink); }}
   .rib-p {{ background:var(--rib-p-bg); color:var(--rib-p-ink); }}
@@ -331,14 +425,18 @@ def build(jobs, archived=0):
             min-width:72px; height:72px; border-radius:12px; gap:1px;
             background:var(--gray-badge); color:var(--gray-badge-ink); }}
   .score .sn {{ font-size:24px; font-weight:800; letter-spacing:-.02em; }}
-  .score .sl {{ font-size:10px; font-weight:700; letter-spacing:.06em; opacity:.8; }}
+  .score .sl {{ font-size:11px; font-weight:700; letter-spacing:.06em; opacity:.8; }}
   .s10,.s9 {{ background:var(--mint); color:var(--mint-ink); }}
   .s8 {{ background:var(--mint-dim); color:var(--mint-ink); }}
   .s7 {{ background:var(--gray-badge); color:var(--gray-badge-ink); }}
   .body {{ flex:1; min-width:0; }}
   .top {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
+  /* view-links (CV / מקור) pinned to the card's top-left corner; RTL: margin-right:auto pushes left */
+  .toplinks {{ display:inline-flex; gap:6px; align-items:center; margin-right:auto; }}
+  .toplinks .btn {{ padding:5px 12px; font-size:12px; border-radius:9999px; }}
+  .toplinks .iconb {{ padding:5px 9px; font-size:13px; }}
   .company {{ font-weight:700; font-size:14.5px; }}
-  .badge {{ font-size:11.5px; border-radius:9999px; padding:3px 11px; font-weight:600; }}
+  .badge {{ font-size:12px; border-radius:9999px; padding:3px 11px; font-weight:600; }}
   .badge-sel {{ border:none; cursor:pointer; font-family:inherit; }}
   .selbox {{ width:17px; height:17px; accent-color:var(--pri); cursor:pointer; flex-shrink:0; }}
   .selbox:disabled {{ opacity:.35; cursor:default; }}
@@ -350,6 +448,9 @@ def build(jobs, archived=0):
               border:1px solid var(--insight-line); border-radius:10px; padding:8px 11px;
               margin-bottom:10px; cursor:pointer; }}
   .insight .ri {{ color:var(--pri); font-size:13px; line-height:1.4; }}
+  .insight::after {{ content:"▾"; color:var(--mut); font-size:12px; margin-right:auto;
+                     align-self:center; transition:transform .15s; }}
+  .insight.open::after {{ transform:rotate(180deg); }}
   .reason {{ color:var(--ink); font-size:12.8px; opacity:.85;
              display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }}
   .insight.open .reason {{ -webkit-line-clamp:unset; }}
@@ -364,7 +465,9 @@ def build(jobs, archived=0):
   .btn.navy:hover {{ background:var(--navy-h); }}
   .btn.outline {{ background:var(--card); color:var(--ink); border:1px solid var(--line2); box-shadow:none; }}
   .btn.outline:hover {{ background:var(--softer); }}
-  .btn.okghost {{ background:var(--okbg); color:var(--ok); box-shadow:none; }}
+  .btn.cvready {{ background:var(--mint); color:var(--mint-ink); font-weight:700;
+                  box-shadow:0 1px 4px rgba(0,33,19,.18); }}
+  .btn.cvready:hover {{ background:var(--mint-dim); }}
   .btn.del {{ background:none; color:var(--err); margin-right:auto; box-shadow:none; }}
   .btn.del:hover {{ background:var(--errbg); }}
   .btn.iconb {{ padding:8px 10px; font-size:15px; }}
@@ -387,7 +490,7 @@ def build(jobs, archived=0):
   .cb-chip.ok {{ border-color:#4ade80; color:#bbf7d0; }}
   .cb-chip.warn {{ border-color:#fbbf24; color:#fde68a; }}
   .cb-chip.err {{ border-color:#f87171; color:#fecaca; }}
-  .cb-idle {{ color:#64748b; }}
+  .cb-idle {{ color:#94a3b8; }}
   .cb-arrow {{ color:#64748b; }}
   .cb-spin {{ display:inline-block; animation:cbrot 1.1s linear infinite; }}
   @keyframes cbrot {{ to {{ transform:rotate(360deg); }} }}
@@ -405,6 +508,9 @@ def build(jobs, archived=0):
   .cb-btn {{ background:#1e293b; border:1px solid #334155; color:#cbd5e1; border-radius:6px; padding:4px 12px;
              cursor:pointer; font-family:inherit; font-size:12px; }}
   .cb-btn:hover {{ background:#334155; }}
+  @media (prefers-reduced-motion:reduce) {{
+    *, *::before, *::after {{ transition:none !important; animation:none !important; }}
+  }}
   @media (max-width:900px) {{
     aside {{ position:static; width:auto; border-left:none; border-bottom:1px solid var(--line);
              flex-direction:row; flex-wrap:wrap; align-items:center; gap:8px; padding:12px 16px; }}
@@ -427,6 +533,23 @@ def build(jobs, archived=0):
     .fgrid {{ grid-template-columns:1fr; }}
     #q {{ width:100%; }}
   }}
+  /* touch devices (phone via LAN/Tailscale): 44px-ish targets, desktop untouched.
+     Last so it wins over the width breakpoints above. */
+  @media (pointer:coarse) {{
+    .btn {{ padding:13px 16px; }}
+    .btn.iconb {{ padding:13px 14px; }}
+    .toplinks .btn {{ padding:10px 14px; }}
+    .toplinks .iconb {{ padding:10px 12px; }}
+    .selbox {{ width:22px; height:22px; }}
+    .badge {{ font-size:13px; padding:8px 13px; }}
+    .f {{ padding:13px 16px; }}
+    #q {{ padding:12px 16px; }}
+    #sortsel {{ padding:12px 14px; }}
+    .navi {{ padding:13px 12px; }}
+    .bigbtn {{ padding:13px 16px; }}
+    .cb-chip {{ padding:7px 13px; }}
+    .cb-tab, .cb-btn {{ padding:8px 14px; }}
+  }}
 </style>
 </head>
 <body>
@@ -448,8 +571,8 @@ def build(jobs, archived=0):
   </div>
   {focus_html}
   <div class="listbar">
-    <input id="q" type="search" placeholder="חיפוש חברה / תפקיד..." oninput="applyView()">
-    <select id="sortsel" onchange="applyView()">
+    <input id="q" type="search" placeholder="חיפוש חברה / תפקיד..." aria-label="חיפוש חברה או תפקיד" oninput="applyView()">
+    <select id="sortsel" aria-label="מיון הרשימה" onchange="applyView()">
       <option value="score">מיון: ציון</option>
       <option value="date">מיון: הכי חדש</option>
     </select>
@@ -479,7 +602,7 @@ def build(jobs, archived=0):
     </div>
   </div>
 </div>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 // file:// (double-click) talks to cv_server on localhost; served over HTTP
 // (phone/LAN/Tailscale) it talks to the same origin that served the page.
@@ -512,7 +635,7 @@ function applyView() {{
   const q = (document.getElementById("q").value || "").trim().toLowerCase();
   document.querySelectorAll(".card").forEach(c => {{
     const okF = curFilter === "הכל" || c.dataset.status === curFilter;
-    const okQ = !q || c.textContent.toLowerCase().includes(q);
+    const okQ = !q || (c.dataset.search || c.textContent.toLowerCase()).includes(q);
     c.style.display = (okF && okQ) ? "flex" : "none";
   }});
   const by = document.getElementById("sortsel").value;
@@ -561,7 +684,7 @@ async function startBatch(mode) {{
   const msg = mode === "full"
     ? (sm === "auto"
         ? "להריץ את הצינור על " + who + "?\\n1) CV למי שאין\\n2) אוטומטי מלא: Codex ימלא ויגיש טופס אחרי טופס לבד\\nעוצר רק על התחברות / CAPTCHA / שאלה שאין לה תשובה."
-        : "להריץ את הצינור על " + who + "?\\n1) CV למי שאין\\n2) Codex ימלא טופס אחרי טופס ויעצור לפני כל שליחה - אתה בודק בכרום ולוחץ Submit\\nהישאר ליד המחשב.")
+        : "להריץ את הצינור על " + who + "?\\n1) CV למי שאין\\n2) Codex יכין את כל הטפסים - ממלא כל אחד בטאב משלו ועובר הלאה, בלי לשלוח\\nבסוף מאשרים אחד-אחד מהכרטיסים (אשר ושלח) מתי שנוח - אפשר גם מהטלפון.")
     : "ליצור CV עבור " + who + " (רק למי שאין)? רץ לבד ברקע, אפשר ללכת.";
   if (!confirm(msg)) return;
   const q = "&ids=" + ids.join(",") + (mode === "full" ? "&submit_mode=" + sm : "");
@@ -574,6 +697,8 @@ async function stopBatch() {{
   try {{ await fetch(BASE + "/batch-stop"); toast("ייעצר אחרי המשימה הנוכחית"); }}
   catch (e) {{ toast("השרת לא מגיב"); }}
 }}
+// ---- on-demand job scan (same routine the scheduled task runs) ----
+{SCAN_JS}
 function companyOf(id) {{
   const c = document.querySelector("#job-" + id + " .company");
   return c ? c.textContent : "#" + id;
@@ -639,6 +764,117 @@ async function genCV(id, btn) {{
     toast("נתקע - נסה שוב עוד רגע (או בדוק את חלון השרת)");
   }}
 }}
+// review package: field summary (+ screenshot) Codex publishes before waiting.
+// Shown inside the card so the form can be reviewed and approved from the phone.
+function reviewBox(id) {{
+  const card = document.getElementById("job-" + id);
+  if (!card) return null;
+  let box = card.querySelector(".review-box");
+  if (!box) {{
+    box = document.createElement("div");
+    box.className = "review-box";
+    box.innerHTML = '<div class="rvh">מה Codex מילא - עבור על הכל, ואז אשר או הגש בכרום בעצמך</div>' +
+      '<img class="rvimg" style="display:none" alt="צילום הטופס">' +
+      '<pre dir="ltr"></pre>' +
+      '<div class="rvb"><button class="btn primary">אשר ושלח</button>' +
+      '<button class="btn outline">סגור</button></div>';
+    card.querySelector(".body").appendChild(box);
+    box.querySelectorAll(".rvb .btn")[1].onclick = () => box.remove();
+  }}
+  return box;
+}}
+async function showReview(id, btn, orig) {{
+  try {{
+    const r = await fetch(BASE + "/review?id=" + id);
+    if (!r.ok) return false;
+    const s = await r.json();
+    const box = reviewBox(id);
+    if (!box) return false;
+    box.querySelector("pre").textContent = s.summary || "";
+    const img = box.querySelector(".rvimg");
+    if (s.shot && img.dataset.src !== s.shot) {{
+      img.src = BASE + "/" + s.shot; img.dataset.src = s.shot; img.style.display = "block";
+      img.onclick = () => window.open(img.src, "_blank");
+    }}
+    box.querySelectorAll(".rvb .btn")[0].onclick = () => approveSubmit(id, btn, orig);
+    return true;
+  }} catch (e) {{ return false; }}
+}}
+async function approveSubmit(id, btn, orig) {{
+  if (!confirm("לאשר? Codex ילחץ Submit עכשיו")) return;
+  let s;
+  try {{ s = await (await fetch(BASE + "/submit-approve?id=" + id)).json(); }}
+  catch (e) {{ return toast("השרת לא מגיב"); }}
+  if (!s.ok) return toast(s.detail || "האישור נכשל");
+  toast("אושר - Codex מגיש עכשיו");
+  const box = document.querySelector("#job-" + id + " .review-box");
+  if (box) box.querySelectorAll(".rvb .btn")[0].disabled = true;
+  if (s.via === "resume") {{
+    btn.disabled = true;
+    btn.textContent = "Codex מגיש...";
+    btn.onclick = null;
+    pollSubmit(id, btn, orig);
+  }}
+}}
+// Codex hit a form question with no stored answer: inline box on the card -
+// the user answers here (works from the phone too), the server appends it to
+// application-answers.md and resumes the same Codex session automatically.
+function answerBox(id, question, scroll) {{
+  const card = document.getElementById("job-" + id);
+  if (!card) return null;
+  let box = card.querySelector(".ans-box");
+  if (!box) {{
+    box = document.createElement("div");
+    box.className = "review-box ans-box";
+    box.innerHTML = '<div class="rvh">Codex נתקע על שאלה בטופס - ענה כאן והוא ימשיך לבד</div>' +
+      '<div class="ans-q" dir="auto"></div>' +
+      '<textarea dir="auto" rows="2" placeholder="התשובה שלך (עברית או אנגלית) - נשמרת לתשובות הקבועות לפעמים הבאות"></textarea>' +
+      '<div class="rvb"><button class="btn primary">שמור והמשך</button>' +
+      '<button class="btn outline">סגור</button></div>';
+    card.querySelector(".body").appendChild(box);
+    box.querySelectorAll(".rvb .btn")[0].onclick = () => sendAnswer(id, box);
+    box.querySelectorAll(".rvb .btn")[1].onclick = () => box.remove();
+  }}
+  if (question) box.dataset.q = question;
+  box.querySelector(".ans-q").textContent =
+    box.dataset.q || "(השאלה לא נשמרה - הלוג המלא בקונסול המשימות למטה)";
+  if (scroll) box.scrollIntoView({{ block: "nearest" }});
+  return box;
+}}
+async function sendAnswer(id, box) {{
+  const answer = box.querySelector("textarea").value.trim();
+  if (!answer) return toast("כתוב תשובה קודם");
+  if (!(await serverUp())) return serverDownMsg();
+  const sv = box.querySelectorAll(".rvb .btn")[0];
+  sv.disabled = true; sv.textContent = "שומר...";
+  let s;
+  try {{
+    s = await (await fetch(BASE + "/submit-answer", {{ method: "POST",
+      body: JSON.stringify({{ id: id, question: box.dataset.q || "", answer: answer }}) }})).json();
+  }} catch (e) {{ sv.disabled = false; sv.textContent = "שמור והמשך"; return toast("השרת לא מגיב"); }}
+  if (!s.ok) {{ sv.disabled = false; sv.textContent = "שמור והמשך"; return toast(s.detail || "השמירה נכשלה"); }}
+  box.remove();
+  const sub = document.querySelector("#job-" + id + " .sub-go");
+  if (s.resumed && sub) {{
+    toast("נשמר - Codex ממשיך מאיפה שנעצר; Claude מלטש את הניסוח לתשובות הקבועות ברקע");
+    const orig = sub.dataset.orig || sub.textContent;
+    sub.dataset.orig = orig;
+    sub.disabled = true; sub.textContent = "Codex ממשיך..."; sub.onclick = null;
+    pollSubmit(id, sub, orig);
+  }} else if (s.resumed) {{
+    toast("נשמר - Codex ממשיך מאיפה שנעצר; Claude מלטש את הניסוח לתשובות הקבועות ברקע");
+  }} else {{
+    toast("נשמר - Claude מלטש את הניסוח ברקע; Codex עסוק כרגע, לחץ 'המשך' בכרטיס כשיתפנה");
+  }}
+}}
+// on load: reopen answer boxes for jobs whose Codex run is still waiting on a question
+async function loadPending() {{
+  try {{
+    const r = await fetch(BASE + "/pending", {{ signal: AbortSignal.timeout(2500) }});
+    if (!r.ok) return;
+    for (const p of ((await r.json()).pending || [])) answerBox(p.id, p.q);
+  }} catch (e) {{}}
+}}
 async function pollSubmit(id, btn, orig) {{
   const restore = () => {{ btn.textContent = orig; btn.disabled = false; btn.onclick = () => submitJob(id, btn); }};
   const contBtn = (msg) => {{
@@ -652,10 +888,12 @@ async function pollSubmit(id, btn, orig) {{
     while (Date.now() - t0 < 45 * 60 * 1000) {{
       await new Promise(r => setTimeout(r, 5000));
       const s = await (await fetch(BASE + "/submit-status?id=" + id)).json();
-      if (s.status === "running") continue;
+      if (s.status === "running") {{ showReview(id, btn, orig); continue; }}
       const d = String(s.detail || "");
       if (s.status === "submitted") {{
         btn.textContent = "הוגש";
+        const box = document.querySelector("#job-" + id + " .review-box");
+        if (box) box.remove();
         toast("הוגש! Codex זיהה את אישור השליחה - הסטטוס עודכן לבד");
         setTimeout(() => location.reload(), 1600);
         return;
@@ -664,12 +902,16 @@ async function pollSubmit(id, btn, orig) {{
         btn.textContent = "הגשתי - עדכן סטטוס";
         btn.disabled = false;
         btn.onclick = () => setStatus(id, "הוגש", btn);
-        toast("הטופס מלא ומחכה לך בכרום - בדוק ולחץ Submit בעצמך, ואז לחץ 'הגשתי - עדכן סטטוס'");
+        await showReview(id, btn, orig);
+        toast("הטופס מלא - בדוק את הסיכום בכרטיס ולחץ 'אשר ושלח', או הגש בכרום בעצמך ועדכן סטטוס");
         return;
       }}
       if (s.status === "login") return contBtn("נדרשת התחברות - התחבר בכרום בדף הפתוח, ואז לחץ המשך");
       if (s.status === "captcha") return contBtn("יש CAPTCHA - פתור בכרום, ואז לחץ המשך");
-      if (s.status === "needs_input") return contBtn("חסרה תשובה: " + d.slice(0, 140) + " - בקש מ-Claude להוסיף ל-application-answers.md, ואז לחץ המשך");
+      if (s.status === "needs_input") {{
+        answerBox(id, d.replace(/^NEEDS_INPUT:?\\s*/, "").trim(), true);
+        return contBtn("Codex נתקע על שאלה - ענה בתיבה שבכרטיס והוא ימשיך לבד");
+      }}
       if (s.status === "busy") {{ restore(); toast(d || "הגשה אחרת רצה כרגע - חכה שתסתיים"); return; }}
       restore(); toast("שגיאה: " + d.slice(0, 160));
       return;
@@ -913,6 +1155,8 @@ function cbCopyFallback(txt, done) {{
 cbPoll();
 selChanged();
 batchPoll();
+scanPoll();
+loadPending();
 (() => {{
   const el = document.getElementById("submode");
   if (!el) return;
@@ -922,6 +1166,16 @@ batchPoll();
     applyMode();
   }};
   applyMode();
+}})();
+// prepared forms survive a page reload: any job with a published review
+// package gets its box (סיכום + אשר ושלח) restored on load
+(async () => {{
+  for (const b of document.querySelectorAll(".sub-go")) {{
+    const card = b.closest(".card");
+    if (!card) continue;
+    const id = parseInt(card.id.replace("job-", ""), 10);
+    if (id) await showReview(id, b, b.textContent);
+  }}
 }})();
 </script>
 </body>
@@ -943,6 +1197,7 @@ SUB_CSS = """
   html { color-scheme: light; }
   body { font-family:"Work Sans","Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--ink); }
   .ic { width:1em; height:1em; vertical-align:-0.13em; flex-shrink:0; }
+  :focus-visible { outline:2px solid var(--pri); outline-offset:2px; }
   aside { position:fixed; top:0; right:0; bottom:0; width:250px; z-index:50;
           background:var(--card); border-left:1px solid var(--line);
           display:flex; flex-direction:column; padding:18px 14px;
@@ -951,7 +1206,7 @@ SUB_CSS = """
   .userbox { display:flex; flex-direction:column; gap:2px; background:var(--softer);
              border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin-bottom:16px; }
   .uname { font-weight:700; font-size:14px; }
-  .urole { color:var(--mut); font-size:11.5px; }
+  .urole { color:var(--mut); font-size:12px; }
   nav.side { display:flex; flex-direction:column; gap:4px; }
   .navi { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px;
           text-decoration:none; color:var(--mut); font-size:13.5px; font-weight:600;
@@ -959,7 +1214,7 @@ SUB_CSS = """
   .navi:hover { background:var(--softer); }
   .navi.act { background:var(--pri); color:var(--pri-ink); }
   .navi .cnt { margin-right:auto; background:var(--soft); border-radius:9999px; padding:1px 8px;
-               font-size:11px; color:var(--mut); }
+               font-size:12px; color:var(--mut); }
   .navi.act .cnt { background:rgba(255,255,255,.2); color:var(--pri-ink); }
   .sidegrow { flex:1; }
   .sideact { display:flex; flex-direction:column; gap:8px; }
@@ -982,7 +1237,7 @@ SUB_CSS = """
   .swrow input:checked ~ .sw::after { transform:translateX(-15px); }
   .swtxt { font-size:12.5px; font-weight:600; color:var(--mut); display:flex; align-items:center; gap:6px; }
   .swrow input:checked ~ .swtxt { color:var(--pri); }
-  .sidefoot { color:var(--mut); font-size:11px; line-height:1.7; padding:12px 10px 0; }
+  .sidefoot { color:var(--mut); font-size:12px; line-height:1.7; padding:12px 10px 0; }
   main { margin-right:250px; padding:22px 26px 60px; }
   .wrap { max-width:900px; margin:0 auto; }
   h1 { font-size:24px; font-weight:700; letter-spacing:-.02em; margin-bottom:4px; }
@@ -1000,6 +1255,9 @@ SUB_CSS = """
            color:var(--navy-ink); padding:10px 22px; border-radius:10px; font-size:14px; opacity:0;
            transition:opacity .25s; pointer-events:none; z-index:70; }
   .toast.show { opacity:1; }
+  @media (prefers-reduced-motion:reduce) {
+    *, *::before, *::after { transition:none !important; animation:none !important; }
+  }
   @media (max-width:900px) {
     aside { position:static; width:auto; border-left:none; border-bottom:1px solid var(--line);
             flex-direction:row; flex-wrap:wrap; align-items:center; gap:8px; padding:12px 16px; }
@@ -1011,6 +1269,13 @@ SUB_CSS = """
     .bigbtn { width:auto; }
     .sidefoot { display:none; }
     main { margin-right:0; padding:16px 14px 60px; }
+  }
+  @media (pointer:coarse) {
+    .btn { padding:12px 15px; }
+    .btn.iconb { padding:12px 12px; }
+    .navi { padding:13px 12px; }
+    .bigbtn { padding:13px 16px; }
+    #q { padding:12px 16px; }
   }
 """
 
@@ -1046,6 +1311,16 @@ def sidebar_html(active, jobs_n, archived_n):
             title="רק למשרות שסימנת עם התיבה בכרטיס: יוצר CV למי שאין, ואז Codex ממלא טופס אחרי טופס - מצב השליחה לפי המתג שלמעלה">הגש נבחרות</button>
     <button class="bigbtn sec dim" id="batch-cv" onclick="startBatch('cv')"
             title="יצירת CV רק למשרות שסימנת (למי שאין) - רץ לבד, אפשר ללכת">CV לנבחרות</button>
+    <div class="scangrp">
+      <div class="scanh">{IC_SEARCH} סריקת משרות - הרץ עכשיו</div>
+      <div class="scanrow">
+        <button class="bigbtn scan" id="scan-cheap" onclick="runScan('cheap')"
+                title="הסריקה היומית: NVIDIA / Intel / Amazon / לינקדאין (חיפה והצפון) / ג'וב מאסטר, רק משרות מ-72 השעות האחרונות. כמה דקות.">מהירה</button>
+        <button class="bigbtn sec scan" id="scan-full" onclick="runScan('full')"
+                title="סריקה מלאה: כל המקורות שנגישים ב-HTTP, חלון של 7 ימים. ארוכה יותר. מקורות שדורשים דפדפן (מיקרוסופט/גוגל/אפל/צ'ק פוינט/דרושים/אולג'ובס/וואטסאפ) לא רצים מכאן - הם נשארים לסריקה המתוזמנת.">מלאה</button>
+      </div>
+      <div class="scanst" id="scanst"></div>
+    </div>
   </div>
   <div class="sidefoot">עודכן {date.today().isoformat()}<br>ארכוב אוטומטי אחרי {STALE_NEW_DAYS} יום</div>
 </aside>"""
@@ -1064,6 +1339,8 @@ function startBatch(mode) {
   toast("הבחירה נעשית בלוח - סמן שם משרות ואז הפעל");
   setTimeout(() => location.href = "dashboard.html", 900);
 }
+""" + SCAN_JS + """
+scanPoll();
 (() => {
   const el = document.getElementById("submode");
   if (!el) return;
@@ -1096,9 +1373,11 @@ def build_archive(rows, jobs_n=0):
     cards = []
     for j in rows:
         link_a = (f'<a class="btn outline iconb" href="{html.escape(str(j["link"]), quote=True)}" '
-                  f'target="_blank" title="פתיחת המשרה במקור">{IC_LINK}</a>') if j["link"] else ""
+                  f'target="_blank" title="פתיחת המשרה במקור" aria-label="פתיחת המשרה במקור">{IC_LINK}</a>') if j["link"] else ""
+        blob = " ".join(str(j[k]) for k in ("company", "title", "location", "arc_reason", "status"))
+        blob = f'{blob} #{j["id"]}'.lower()
         cards.append(f"""
-    <div class="acard" id="ar-{j['id']}">
+    <div class="acard" id="ar-{j['id']}" data-search="{html.escape(blob, quote=True)}">
       <span class="fscore s{min(int(j['score'] or 0), 10)}">{j['score']}</span>
       <div class="atxt">
         <div class="arow"><span class="ac">{html.escape(str(j['company']))}</span>
@@ -1110,7 +1389,7 @@ def build_archive(rows, jobs_n=0):
       </div>
       <div class="aact">{link_a}
         <button class="btn navy" onclick="restoreJob({j['id']}, this)">שחזר ללוח</button>
-        <button class="btn del iconb" onclick="delArchived({j['id']}, this)" title="מחיקה סופית מהארכיון (לא יחזור בסריקות)">{IC_TRASH}</button></div>
+        <button class="btn del iconb" onclick="delArchived({j['id']}, this)" title="מחיקה סופית מהארכיון (לא יחזור בסריקות)" aria-label="מחיקה סופית מהארכיון">{IC_TRASH}</button></div>
     </div>""")
     body = "".join(cards) if cards else '<div class="panel mut">הארכיון ריק.</div>'
     clear_btn = (f'<button class="btn delall" onclick="clearArchive()">מחק הכל ({len(rows)})</button>'
@@ -1152,6 +1431,10 @@ def build_archive(rows, jobs_n=0):
   .abar {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }}
   #q {{ border:1px solid var(--line); background:var(--card); color:var(--ink);
         border-radius:9999px; padding:9px 14px; font-size:13px; font-family:inherit; width:240px; }}
+  @media (pointer:coarse) {{
+    .acard .btn {{ padding:12px 15px; }}
+    .acard .btn.iconb {{ padding:12px 12px; }}
+  }}
 </style>
 </head>
 <body>
@@ -1161,19 +1444,19 @@ def build_archive(rows, jobs_n=0):
   <h1>ארכיון משרות</h1>
   <div class="sub">{len(rows)} משרות. שחזור מחזיר ללוח בסטטוס "חדש" (ולא ייארכב שוב); מחיקה היא סופית - המשרה לא תחזור בסריקות.</div>
   <div class="abar">
-    <input id="q" type="search" placeholder="חיפוש בארכיון..." oninput="flt()">
+    <input id="q" type="search" placeholder="חיפוש בארכיון..." aria-label="חיפוש בארכיון" oninput="flt()">
     {clear_btn}
   </div>
   <div id="list">{body}</div>
 </div>
 </main>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 {SIDE_JS}
 function flt() {{
   const q = (document.getElementById("q").value || "").trim().toLowerCase();
   document.querySelectorAll(".acard").forEach(c => {{
-    c.style.display = (!q || c.textContent.toLowerCase().includes(q)) ? "flex" : "none";
+    c.style.display = (!q || (c.dataset.search || c.textContent.toLowerCase()).includes(q)) ? "flex" : "none";
   }});
 }}
 async function restoreJob(id, btn) {{
@@ -1316,7 +1599,7 @@ def build_profile(jobs_n=0, archived_n=0):
   <div class="panel"><h2>קריטריוני החיפוש (profile.md)</h2>{render_md(prof_md)}</div>
 </div>
 </main>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 {SIDE_JS}
 </script>
