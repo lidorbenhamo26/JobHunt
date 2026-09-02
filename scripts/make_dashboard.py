@@ -11,6 +11,7 @@ preference.
 """
 import html
 import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -41,6 +42,7 @@ IC_USER = _svg("M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4.42 0-8 2.24-8 5v1h16v
 IC_BOLT = _svg("M7 2v11h3v9l7-12h-4l4-8H7z")
 IC_DOC = _svg("M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z")
 IC_SEARCH = _svg("M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z")
+IC_SEND = _svg("M2.01 21L23 12 2.01 3 2 10l15 2-15 2z")
 
 
 # On-demand scan controls. Shared verbatim by the dashboard and the sub-pages,
@@ -96,11 +98,49 @@ async function scanPoll() {
 """
 
 
+# Live-submissions badge in the sidebar. Shared by every page (depends only on
+# BASE). A page may define onLive(records, payload) to react to each poll.
+LIVE_JS = """
+let liveRecs = [], liveAttn = 0, liveNow = Date.now() / 1000;
+async function livePoll() {
+  let j;
+  try { j = await (await fetch(BASE + "/submissions", { signal: AbortSignal.timeout(2500) })).json(); }
+  catch (e) { return setTimeout(livePoll, 8000); }
+  liveRecs = j.submissions || []; liveAttn = j.attention || 0; liveNow = j.now || Date.now() / 1000;
+  const b = document.getElementById("live-cnt");
+  if (b) {
+    b.textContent = liveAttn ? String(liveAttn) : "";
+    b.style.display = liveAttn ? "" : "none";
+    b.classList.toggle("attn", liveAttn > 0);
+  }
+  if (typeof onLive === "function") { try { onLive(liveRecs, j); } catch (e) {} }
+  setTimeout(livePoll, liveRecs.some(r => r.status === "running") ? 3000 : 6000);
+}
+livePoll();
+"""
+
+
 def parse_d(s):
     try:
         return date.fromisoformat(str(s)[:10])
     except (ValueError, TypeError):
         return None
+
+
+def load_cv_reviews():
+    """job id -> the CV review agent's verdict (output/cv-data/<id>_*.review.json)."""
+    out = {}
+    for p in sorted((ROOT / "output" / "cv-data").glob("*.review.json")):
+        m = re.match(r"(\d+)_", p.name)
+        if not m:
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8-sig"))
+        except Exception:  # noqa: BLE001
+            continue
+        d["_file"] = p.name
+        out[int(m.group(1))] = d
+    return out
 
 
 def age_text(days):
@@ -155,6 +195,7 @@ def load_jobs():
 
 def build(jobs, archived=0):
     resumable = load_submit_sessions()
+    reviews = load_cv_reviews()
     today = date.today()
     cards = []
     for j in jobs:
@@ -180,6 +221,17 @@ def build(jobs, archived=0):
         if j["cv"]:
             # Relative path - opens the PDF straight off disk from file://.
             cv_html = f'<a class="btn cvready" href="output/{html.escape(str(j["cv"]), quote=True)}" target="_blank" title="פתיחת ה-CV המוכן (PDF)">{IC_DOC} CV מוכן</a>'
+            rv = reviews.get(j["id"])
+            if rv:
+                # the CV review agent's verdict (relevance / fit / ATS pass)
+                verdict = str(rv.get("verdict", ""))
+                score = rv.get("score", "")
+                cls = "ok" if verdict in ("pass", "fixed") else "warn"
+                label = {"pass": "נבדק", "fixed": "נבדק ותוקן", "fail": "נבדק - יש הערות"}.get(verdict, "נבדק")
+                tip = html.escape(str(rv.get("summary", ""))[:300], quote=True)
+                md = rv["_file"][:-len(".review.json")] + ".review.md"
+                cv_html += (f'<a class="btn cvrev {cls}" href="output/cv-data/{html.escape(md, quote=True)}" '
+                            f'target="_blank" title="{tip}">{label}{f" {score}/10" if score != "" else ""}</a>')
         status_opts = "".join(
             f'<option value="{s}"{" selected" if j["status"] == s else ""}>{s}</option>'
             for s in STATUS_COLORS
@@ -468,6 +520,10 @@ def build(jobs, archived=0):
   .btn.cvready {{ background:var(--mint); color:var(--mint-ink); font-weight:700;
                   box-shadow:0 1px 4px rgba(0,33,19,.18); }}
   .btn.cvready:hover {{ background:var(--mint-dim); }}
+  .btn.cvrev {{ box-shadow:none; border:1px solid var(--line2); background:var(--card); color:var(--mut); font-weight:600; }}
+  .btn.cvrev.ok {{ border-color:var(--mint-dim); color:var(--ok); }}
+  .btn.cvrev.warn {{ border-color:#f6c94c; color:var(--rib-y-ink); background:#fffbe6; }}
+  .navi .cnt.attn {{ background:var(--err); color:#fff; font-weight:700; }}
   .btn.del {{ background:none; color:var(--err); margin-right:auto; box-shadow:none; }}
   .btn.del:hover {{ background:var(--errbg); }}
   .btn.iconb {{ padding:8px 10px; font-size:15px; }}
@@ -699,6 +755,15 @@ async function stopBatch() {{
 }}
 // ---- on-demand job scan (same routine the scheduled task runs) ----
 {SCAN_JS}
+// ---- live submissions badge + open Codex questions on their cards ----
+{LIVE_JS}
+function onLive(recs) {{
+  for (const r of recs) {{
+    if (r.dismissed || r.status !== "question" || !r.question) continue;
+    const card = document.getElementById("job-" + r.id);
+    if (card && !card.querySelector(".ans-box")) answerBox(r.id, r.question, false, "reply");
+  }}
+}}
 function companyOf(id) {{
   const c = document.querySelector("#job-" + id + " .company");
   return c ? c.textContent : "#" + id;
@@ -819,22 +884,35 @@ async function approveSubmit(id, btn, orig) {{
 // Codex hit a form question with no stored answer: inline box on the card -
 // the user answers here (works from the phone too), the server appends it to
 // application-answers.md and resumes the same Codex session automatically.
-function answerBox(id, question, scroll) {{
+// kind "answer" = a form question (saved to application-answers.md, /submit-answer);
+// kind "reply"  = Codex asked the human something (QUESTION:) - free text, /submit-reply
+function answerBox(id, question, scroll, kind) {{
   const card = document.getElementById("job-" + id);
   if (!card) return null;
+  kind = kind || "answer";
   let box = card.querySelector(".ans-box");
   if (!box) {{
     box = document.createElement("div");
     box.className = "review-box ans-box";
-    box.innerHTML = '<div class="rvh">Codex נתקע על שאלה בטופס - ענה כאן והוא ימשיך לבד</div>' +
+    box.innerHTML = '<div class="rvh"></div>' +
       '<div class="ans-q" dir="auto"></div>' +
-      '<textarea dir="auto" rows="2" placeholder="התשובה שלך (עברית או אנגלית) - נשמרת לתשובות הקבועות לפעמים הבאות"></textarea>' +
-      '<div class="rvb"><button class="btn primary">שמור והמשך</button>' +
-      '<button class="btn outline">סגור</button></div>';
+      '<textarea dir="auto" rows="2"></textarea>' +
+      '<div class="rvb"><button class="btn primary"></button>' +
+      '<button class="btn outline">סגור</button>' +
+      '<a class="btn outline" href="submissions.html">הגשות לייב</a></div>';
     card.querySelector(".body").appendChild(box);
     box.querySelectorAll(".rvb .btn")[0].onclick = () => sendAnswer(id, box);
     box.querySelectorAll(".rvb .btn")[1].onclick = () => box.remove();
   }}
+  box.dataset.kind = kind;
+  const reply = kind === "reply";
+  box.querySelector(".rvh").textContent = reply
+    ? "Codex שואל אותך - ענה כאן והוא ימשיך (הכל גם בדף הגשות לייב)"
+    : "Codex נתקע על שאלה בטופס - ענה כאן והוא ימשיך לבד";
+  box.querySelector("textarea").placeholder = reply
+    ? "התשובה / ההנחיה שלך ל-Codex (עברית או אנגלית)"
+    : "התשובה שלך (עברית או אנגלית) - נשמרת לתשובות הקבועות לפעמים הבאות";
+  box.querySelectorAll(".rvb .btn")[0].textContent = reply ? "שלח ל-Codex" : "שמור והמשך";
   if (question) box.dataset.q = question;
   box.querySelector(".ans-q").textContent =
     box.dataset.q || "(השאלה לא נשמרה - הלוג המלא בקונסול המשימות למטה)";
@@ -846,14 +924,27 @@ async function sendAnswer(id, box) {{
   if (!answer) return toast("כתוב תשובה קודם");
   if (!(await serverUp())) return serverDownMsg();
   const sv = box.querySelectorAll(".rvb .btn")[0];
-  sv.disabled = true; sv.textContent = "שומר...";
+  const label = sv.textContent;
+  sv.disabled = true; sv.textContent = "שולח...";
+  const reply = box.dataset.kind === "reply";
   let s;
   try {{
-    s = await (await fetch(BASE + "/submit-answer", {{ method: "POST",
-      body: JSON.stringify({{ id: id, question: box.dataset.q || "", answer: answer }}) }})).json();
-  }} catch (e) {{ sv.disabled = false; sv.textContent = "שמור והמשך"; return toast("השרת לא מגיב"); }}
-  if (!s.ok) {{ sv.disabled = false; sv.textContent = "שמור והמשך"; return toast(s.detail || "השמירה נכשלה"); }}
+    s = await (await fetch(BASE + (reply ? "/submit-reply" : "/submit-answer"), {{ method: "POST",
+      body: JSON.stringify({{ id: id, question: box.dataset.q || "", answer: answer, text: answer }}) }})).json();
+  }} catch (e) {{ sv.disabled = false; sv.textContent = label; return toast("השרת לא מגיב"); }}
+  if (!s.ok) {{ sv.disabled = false; sv.textContent = label; return toast(s.detail || "השליחה נכשלה"); }}
   box.remove();
+  if (reply) {{
+    const sub2 = document.querySelector("#job-" + id + " .sub-go");
+    toast("נשלח - Codex ממשיך; המעקב בדף הגשות לייב");
+    if (sub2) {{
+      const orig2 = sub2.dataset.orig || sub2.textContent;
+      sub2.dataset.orig = orig2;
+      sub2.disabled = true; sub2.textContent = "Codex ממשיך..."; sub2.onclick = null;
+      pollSubmit(id, sub2, orig2);
+    }}
+    return;
+  }}
   const sub = document.querySelector("#job-" + id + " .sub-go");
   if (s.resumed && sub) {{
     toast("נשמר - Codex ממשיך מאיפה שנעצר; Claude מלטש את הניסוח לתשובות הקבועות ברקע");
@@ -902,8 +993,20 @@ async function pollSubmit(id, btn, orig) {{
         btn.textContent = "הגשתי - עדכן סטטוס";
         btn.disabled = false;
         btn.onclick = () => setStatus(id, "הוגש", btn);
-        await showReview(id, btn, orig);
-        toast("הטופס מלא - בדוק את הסיכום בכרטיס ולחץ 'אשר ושלח', או הגש בכרום בעצמך ועדכן סטטוס");
+        if (await showReview(id, btn, orig)) {{
+          toast("הטופס מלא - בדוק את הסיכום בכרטיס ולחץ 'אשר ושלח', או הגש בכרום בעצמך ועדכן סטטוס");
+        }} else {{
+          // no review package = nothing to approve; treat it as a question
+          answerBox(id, d.replace(/^READY_FOR_REVIEW:?\\s*/, "").trim(), true, "reply");
+          restore();
+          toast("Codex עצר בלי למלא את הטופס - קרא מה כתב וענה לו (גם בדף הגשות לייב)");
+        }}
+        return;
+      }}
+      if (s.status === "question") {{
+        answerBox(id, d.replace(/^QUESTION:?\\s*/, "").trim(), true, "reply");
+        restore();
+        toast("Codex שואל אותך שאלה - ענה בתיבה שבכרטיס או בדף הגשות לייב");
         return;
       }}
       if (s.status === "login") return contBtn("נדרשת התחברות - התחבר בכרום בדף הפתוח, ואז לחץ המשך");
@@ -982,7 +1085,7 @@ const CB_STATUS = {{
   ready: ["ממתין ל-Submit שלך", "warn"], submitted: ["הוגש", "ok"],
   login: ["צריך התחברות", "warn"], captcha: ["צריך CAPTCHA", "warn"],
   needs_input: ["חסרה תשובה", "warn"], busy: ["עסוק", "warn"],
-  stopped: ["נעצר", "warn"],
+  question: ["שאלה אליך", "warn"], stopped: ["נעצר", "warn"],
 }};
 const CB_KIND = {{ claude: "Claude", codex: "Codex", batch: "צינור" }};
 function cbFmt(t, now) {{
@@ -1108,7 +1211,7 @@ async function cbFetchLog() {{
     }}
     const det = document.getElementById("cb-detail");
     const isErr = j.status === "error";
-    const isWarn = ["ready", "login", "captcha", "needs_input", "busy"].includes(j.status);
+    const isWarn = ["ready", "login", "captcha", "needs_input", "busy", "question"].includes(j.status);
     if (j.detail && (isErr || isWarn)) {{
       det.style.display = "block";
       det.className = isWarn ? "warn" : "";
@@ -1216,6 +1319,7 @@ SUB_CSS = """
   .navi .cnt { margin-right:auto; background:var(--soft); border-radius:9999px; padding:1px 8px;
                font-size:12px; color:var(--mut); }
   .navi.act .cnt { background:rgba(255,255,255,.2); color:var(--pri-ink); }
+  .navi .cnt.attn { background:var(--err); color:#fff; font-weight:700; }
   .sidegrow { flex:1; }
   .sideact { display:flex; flex-direction:column; gap:8px; }
   .bigbtn { border:none; border-radius:10px; padding:11px 16px; font-size:13.5px; font-weight:700;
@@ -1297,6 +1401,7 @@ def sidebar_html(active, jobs_n, archived_n):
   </div>
   <nav class="side">
     <a class="{cls('dash')}" href="dashboard.html">{IC_GRID} לוח משרות <span class="cnt">{jobs_n}</span></a>
+    <a class="{cls('live')}" href="submissions.html" title="כל ההגשות ש-Codex עובד עליהן: מה מילא, מה שאל, ואישור/תיקון מכאן">{IC_SEND} הגשות לייב <span class="cnt" id="live-cnt" style="display:none"></span></a>
     <a class="{cls('archive')}" href="archive.html">{IC_BOX} ארכיון <span class="cnt">{archived_n}</span></a>
     <a class="{cls('profile')}" href="profile.html">{IC_USER} הפרופיל שלי</a>
   </nav>
@@ -1339,7 +1444,7 @@ function startBatch(mode) {
   toast("הבחירה נעשית בלוח - סמן שם משרות ואז הפעל");
   setTimeout(() => location.href = "dashboard.html", 900);
 }
-""" + SCAN_JS + """
+""" + SCAN_JS + LIVE_JS + """
 scanPoll();
 (() => {
   const el = document.getElementById("submode");
@@ -1506,6 +1611,328 @@ async function clearArchive() {{
 </html>"""
 
 
+# ---------------------------------------------------------------- live submissions
+# Everything Codex is doing with application forms, one card per job: its
+# report, the open question, the field-by-field summary + screenshot, the
+# back-and-forth, and the reply/approve/continue/cancel controls. Renders from
+# /submissions (polled), so it works from the phone too.
+LIVE_PAGE_JS = r"""
+const ST = {
+  running: ["Codex עובד על הטופס", "run"], question: ["Codex שואל אותך", "attn"],
+  ready: ["מוכן - ממתין לאישור שלך", "attn"], needs_input: ["חסרה תשובה לטופס", "attn"],
+  login: ["צריך התחברות בכרום", "attn"], captcha: ["צריך לפתור CAPTCHA", "attn"],
+  submitted: ["הוגש", "ok"], error: ["שגיאה", "err"], cancelled: ["בוטל", "mut"],
+  busy: ["ממתין לתור", "mut"],
+};
+const ATTN = ["question", "ready", "needs_input", "login", "captcha"];
+let recs = [], sig = "", filt = "attn", openHist = new Set(), drafts = {};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function ago(ts) {
+  const s = Math.max(0, Math.round(liveNow - (ts || liveNow)));
+  if (s < 60) return "לפני רגע";
+  const m = Math.round(s / 60); if (m < 60) return "לפני " + m + " דק'";
+  const h = Math.round(m / 60); if (h < 24) return "לפני " + h + " שע'";
+  return "לפני " + Math.round(h / 24) + " ימים";
+}
+function setFilt(f, btn) {
+  filt = f;
+  document.querySelectorAll(".f").forEach(b => b.classList.toggle("on", b === btn));
+  render(true);
+}
+function visible(r) {
+  if (filt === "all") return true;
+  if (r.dismissed) return false;
+  if (filt === "attn") return ATTN.includes(r.status);
+  if (filt === "run") return r.status === "running";
+  return true;
+}
+function onLive(rs, j) {
+  recs = rs;
+  const cnt = { attn: rs.filter(r => !r.dismissed && ATTN.includes(r.status)).length,
+                run: rs.filter(r => r.status === "running").length, all: rs.length };
+  for (const k in cnt) { const e = document.getElementById("cnt-" + k); if (e) e.textContent = cnt[k]; }
+  const busy = document.getElementById("busy");
+  if (busy) busy.style.display = (j.busy && !cnt.run) ? "block" : "none";
+  render(false);
+  fetchLogs();
+}
+function fieldsHtml(r) {
+  if (r.fields && r.fields.length) {
+    return '<div class="fh">מה Codex מילא בטופס</div><table class="fld">' + r.fields.map(f =>
+      `<tr class="${f.inferred ? "inf" : ""}"><th>${esc(f.label)}</th><td dir="auto">${esc(f.value)}` +
+      (f.inferred ? ' <span class="tag">הסקה של Codex - בדוק</span>' : "") + "</td></tr>").join("") + "</table>";
+  }
+  if (r.review) return '<div class="fh">מה Codex מילא בטופס</div><pre class="rv" dir="auto">' + esc(r.review) + "</pre>";
+  return "";
+}
+function card(r) {
+  const st = ST[r.status] || [r.status, "mut"];
+  const codexTurns = (r.history || []).filter(h => h.who === "codex");
+  const lastCodex = codexTurns.length ? codexTurns[codexTurns.length - 1].text : (r.last_message || "");
+  const term = ["submitted", "cancelled"].includes(r.status);
+  const canReply = r.resumable && !term && r.status !== "running";
+  const shot = r.shot ? `<a class="shot" href="${BASE}/${r.shot}" target="_blank" title="פתיחת הצילום בגודל מלא"><img src="${BASE}/${r.shot}" alt="צילום הטופס המלא"></a>` : "";
+  const hist = (r.history || []);
+  const histHtml = hist.length ? `<button class="lnk" onclick="toggleHist(${r.id})">${openHist.has(r.id) ? "הסתר" : "הצג"} את כל השיחה (${hist.length})</button>` +
+    `<div class="hist" id="hist-${r.id}" style="display:${openHist.has(r.id) ? "block" : "none"}">` +
+    hist.map(h => `<div class="bub ${h.who}"><div class="who">${h.who === "me" ? "אני" : "Codex"} · ${ago(h.ts)}</div><div class="txt" dir="auto">${esc(h.text)}</div></div>`).join("") + "</div>" : "";
+  const acts = [];
+  if (r.status === "running" && r.task_key) acts.push(`<button class="btn outline" onclick="stopRun('${esc(r.task_key)}', this)">עצור את Codex</button>`);
+  if (r.status === "ready") {
+    acts.push(`<button class="btn primary" onclick="approve(${r.id}, this)">אשר ושלח</button>`);
+    acts.push(`<button class="btn outline" onclick="markSent(${r.id}, this)">הגשתי בעצמי בכרום</button>`);
+  }
+  if (["login", "captcha"].includes(r.status)) acts.push(`<button class="btn primary" onclick="cont(${r.id}, this)">המשך - פתרתי בכרום</button>`);
+  if (r.status === "error") acts.push(`<button class="btn navy" onclick="retry(${r.id}, this)">נסה שוב מההתחלה</button>`);
+  if (!term && r.status !== "running") acts.push(`<button class="btn del" onclick="cancel(${r.id}, this)">בטל הגשה</button>`);
+  if (term || r.status === "error") acts.push(`<button class="btn outline" onclick="dismiss(${r.id}, this)">הסר מהרשימה</button>`);
+  const ph = r.status === "question" ? "התשובה שלך ל-Codex"
+    : r.status === "ready" ? "רוצה לשנות משהו לפני השליחה? כתוב ל-Codex (למשל: תשנה את ציפיות השכר ל-28,000)"
+    : r.status === "needs_input" ? "התשובה לשאלה שבטופס"
+    : "הנחיה ל-Codex";
+  const reply = canReply ? `<div class="reply">
+      <textarea id="ta-${r.id}" dir="auto" rows="2" placeholder="${esc(ph)}"></textarea>
+      <div class="rrow">
+        <label class="sv"><input type="checkbox" id="sv-${r.id}"${r.status === "needs_input" ? " checked" : ""}> שמור כתשובה קבועה לפעמים הבאות</label>
+        <button class="btn primary" onclick="reply(${r.id}, this)">שלח ל-Codex</button>
+      </div></div>` : "";
+  const q = r.question ? `<div class="q" dir="auto"><b>${r.status === "needs_input" ? "השאלה בטופס:" : r.status === "error" ? "מה קרה:" : "Codex שואל:"}</b> ${esc(r.question)}</div>` : "";
+  const msg = lastCodex ? `<div class="msg"><div class="who">Codex</div><div class="txt" dir="auto">${esc(lastCodex)}</div></div>` : "";
+  const log = r.status === "running" ? `<pre class="log" id="log-${r.id}" dir="ltr">...</pre>` : "";
+  return `<div class="lc ${st[1]}" id="lc-${r.id}">
+    <div class="lh">
+      <span class="stc ${st[1]}">${r.status === "running" ? '<span class="spin">◐</span> ' : ""}${st[0]}</span>
+      <span class="co">${esc(r.company)}</span>
+      <span class="ti">${esc(r.title)}</span>
+      <span class="meta">#${r.id} · ${r.mode === "auto" ? "אוטומטי" : "הכנה"} · ${ago(r.updated)}</span>
+      <span class="links"><a class="btn outline sm" href="dashboard.html#job-${r.id}">הכרטיס בלוח</a>${r.link ? `<a class="btn outline sm" href="${esc(r.link)}" target="_blank">המשרה</a>` : ""}</span>
+    </div>
+    ${q}${msg}${log}${fieldsHtml(r)}${shot}${histHtml}${reply}
+    <div class="acts">${acts.join("")}</div>
+  </div>`;
+}
+function render(force) {
+  const show = recs.filter(visible);
+  const s = JSON.stringify(show.map(r => [r.id, r.status, r.updated, r.dismissed, (r.history || []).length, r.shot, r.resumable])) + filt + [...openHist].join(",");
+  if (!force && s === sig) return;
+  sig = s;
+  document.querySelectorAll("textarea[id^='ta-']").forEach(t => { if (t.value) drafts[t.id] = t.value; });
+  const list = document.getElementById("list");
+  list.innerHTML = show.length ? show.map(card).join("") :
+    `<div class="panel mut">${filt === "attn" ? "כלום לא מחכה לך כרגע. הגשות חדשות יוצאות מהלוח (כפתור 'הגש מועמדות' בכרטיס)." : "אין הגשות עדיין."}</div>`;
+  for (const id in drafts) { const t = document.getElementById(id); if (t) t.value = drafts[id]; }
+}
+function toggleHist(id) { openHist.has(id) ? openHist.delete(id) : openHist.add(id); render(true); }
+async function fetchLogs() {
+  for (const r of recs) {
+    if (r.status !== "running" || !r.task_key) continue;
+    const el = document.getElementById("log-" + r.id);
+    if (!el) continue;
+    try {
+      const j = await (await fetch(BASE + "/task-log?key=" + encodeURIComponent(r.task_key) + "&from=0", { signal: AbortSignal.timeout(2500) })).json();
+      const lines = (j.lines || []).slice(-8);
+      el.textContent = lines.length ? lines.join("\n") : "מתחיל...";
+    } catch (e) {}
+  }
+}
+async function api(path, opts) {
+  let r;
+  try { r = await fetch(BASE + path, Object.assign({ signal: AbortSignal.timeout(30000) }, opts || {})); }
+  catch (e) { toast("השרת המקומי לא מגיב - start-cv-server.bat"); return null; }
+  try { return await r.json(); } catch (e) { return { ok: r.ok }; }
+}
+async function reply(id, btn) {
+  const ta = document.getElementById("ta-" + id);
+  const text = (ta.value || "").trim();
+  if (!text) return toast("כתוב קודם מה להגיד ל-Codex");
+  btn.disabled = true; btn.textContent = "שולח...";
+  const save = !!(document.getElementById("sv-" + id) || {}).checked;
+  const j = await api("/submit-reply", { method: "POST", body: JSON.stringify({ id: id, text: text, save_answer: save }) });
+  btn.disabled = false; btn.textContent = "שלח ל-Codex";
+  if (!j) return;
+  if (!j.ok) return toast(j.detail || "השליחה נכשלה");
+  delete drafts["ta-" + id]; ta.value = "";
+  toast("נשלח - Codex ממשיך" + (save ? "; התשובה נשמרת גם לתשובות הקבועות" : ""));
+  livePoll();
+}
+async function approve(id, btn) {
+  if (!confirm("לאשר? Codex ילחץ Submit עכשיו בטאב הפתוח.")) return;
+  btn.disabled = true;
+  const j = await api("/submit-approve?id=" + id);
+  btn.disabled = false;
+  if (!j) return;
+  if (!j.ok) return toast(j.detail || "האישור נכשל");
+  toast("אושר - Codex מגיש עכשיו");
+  livePoll();
+}
+async function cont(id, btn) {
+  btn.disabled = true;
+  const j = await api("/submit-continue?id=" + id);
+  btn.disabled = false;
+  if (!j) return;
+  toast(j.status === "running" ? "Codex ממשיך מאיפה שנעצר" : (j.detail || "לא הצלחתי להמשיך"));
+  livePoll();
+}
+async function retry(id, btn) {
+  const r = recs.find(x => x.id === id);
+  const mode = r && r.mode === "auto" ? "auto" : "review";
+  if (!confirm("להריץ את ההגשה מההתחלה" + (mode === "auto" ? " (אוטומטי מלא - Codex גם ילחץ Submit)" : " (מצב הכנה)") + "?")) return;
+  btn.disabled = true;
+  const j = await api("/submit?id=" + id + "&mode=" + mode);
+  btn.disabled = false;
+  if (!j) return;
+  toast(j.status === "running" ? "Codex התחיל מחדש" : (j.detail || "לא יצא לדרך"));
+  livePoll();
+}
+async function cancel(id, btn) {
+  if (!confirm("לבטל את ההגשה? הטופס לא יישלח (הטאב בכרום נשאר פתוח - סגור אותו בעצמך).")) return;
+  btn.disabled = true;
+  const j = await api("/submit-cancel?id=" + id);
+  btn.disabled = false;
+  if (!j) return;
+  if (!j.ok) return toast(j.detail || "הביטול נכשל");
+  toast("בוטל");
+  livePoll();
+}
+async function dismiss(id, btn) {
+  btn.disabled = true;
+  const j = await api("/submit-dismiss?id=" + id);
+  if (!j || !j.ok) { btn.disabled = false; return toast((j && j.detail) || "לא הוסר"); }
+  livePoll();
+}
+async function markSent(id, btn) {
+  if (!confirm("לסמן את משרה #" + id + " כהוגשה?")) return;
+  btn.disabled = true;
+  const j = await api("/set-status?id=" + id + "&status=" + encodeURIComponent("הוגש"));
+  btn.disabled = false;
+  if (!j) return;
+  if (!j.ok) return toast(j.detail || "העדכון נכשל");
+  await api("/submit-cancel?id=" + id);
+  toast("סומן כהוגש");
+  livePoll();
+}
+async function stopRun(key, btn) {
+  if (!confirm("לעצור את Codex באמצע? מה שמילא עד עכשיו נשאר בטאב.")) return;
+  btn.disabled = true;
+  const j = await api("/task-stop?key=" + encodeURIComponent(key));
+  btn.disabled = false;
+  if (!j) return;
+  toast(j.ok ? "נעצר" : ("העצירה נכשלה: " + (j.detail || "")));
+  livePoll();
+}
+"""
+
+
+def build_submissions(jobs_n=0, archived_n=0):
+    return f"""<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JobHunt - הגשות לייב</title>
+<style>
+{SUB_CSS}
+  .wrap {{ max-width:980px; }}
+  .fbar {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }}
+  .f {{ border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:9999px;
+        padding:8px 14px; font-size:12.5px; cursor:pointer; font-family:inherit; box-shadow:var(--shadow); }}
+  .f .cnt {{ background:var(--soft); border-radius:9999px; padding:1px 7px; font-size:12px; color:var(--mut); }}
+  .f.on {{ background:var(--navy); color:var(--navy-ink); border-color:var(--navy); }}
+  .f.on .cnt {{ background:rgba(255,255,255,.18); color:var(--navy-ink); }}
+  #busy {{ display:none; }}
+  .lc {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px;
+         margin-bottom:12px; box-shadow:var(--shadow); border-right:4px solid var(--line2); }}
+  .lc.attn {{ border-right-color:var(--pri); }}
+  .lc.run {{ border-right-color:#38bdf8; }}
+  .lc.ok {{ border-right-color:var(--ok); }}
+  .lc.err {{ border-right-color:var(--err); }}
+  .lh {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }}
+  .stc {{ font-size:12px; font-weight:700; border-radius:9999px; padding:4px 11px; background:var(--gray-badge); }}
+  .stc.attn {{ background:var(--rib-p-bg); color:var(--rib-p-ink); }}
+  .stc.run {{ background:#e0f2fe; color:#075985; }}
+  .stc.ok {{ background:var(--okbg); color:var(--ok); }}
+  .stc.err {{ background:var(--errbg); color:var(--err); }}
+  .stc.mut {{ color:var(--mut); }}
+  .spin {{ display:inline-block; animation:rot 1.1s linear infinite; }}
+  @keyframes rot {{ to {{ transform:rotate(360deg); }} }}
+  .co {{ font-weight:700; font-size:14.5px; }}
+  .ti {{ font-weight:600; font-size:14px; }}
+  .meta {{ color:var(--mut); font-size:12px; }}
+  .links {{ display:inline-flex; gap:6px; margin-right:auto; }}
+  .btn {{ border:none; border-radius:9px; padding:8px 15px; font-size:13px; font-weight:600; cursor:pointer;
+          text-decoration:none; display:inline-flex; align-items:center; gap:5px; font-family:inherit;
+          box-shadow:var(--shadow); }}
+  .btn.sm {{ padding:5px 11px; font-size:12px; border-radius:9999px; }}
+  .btn.primary {{ background:var(--pri); color:var(--pri-ink); font-weight:700; }}
+  .btn.primary:hover {{ background:var(--pri-h); }}
+  .btn.navy {{ background:var(--navy); color:var(--navy-ink); }}
+  .btn.outline {{ background:var(--card); color:var(--ink); border:1px solid var(--line2); box-shadow:none; }}
+  .btn.outline:hover {{ background:var(--softer); }}
+  .btn.del {{ background:none; color:var(--err); box-shadow:none; margin-right:auto; }}
+  .btn.del:hover {{ background:var(--errbg); }}
+  .btn:disabled {{ opacity:.6; cursor:default; }}
+  .lnk {{ background:none; border:none; color:var(--pri); font-family:inherit; font-size:12.5px; cursor:pointer;
+          padding:4px 0; text-decoration:underline; }}
+  .q {{ background:var(--rib-p-bg); color:var(--rib-p-ink); border-radius:10px; padding:10px 12px;
+        font-size:13.5px; line-height:1.6; margin-bottom:10px; white-space:pre-wrap; }}
+  .lc.err .q {{ background:var(--errbg); color:var(--err); }}
+  .msg {{ background:var(--softer); border:1px solid var(--line); border-radius:10px; padding:9px 12px; margin-bottom:10px; }}
+  .msg .who, .bub .who {{ font-size:11.5px; font-weight:700; color:var(--mut); margin-bottom:3px; }}
+  .msg .txt, .bub .txt {{ font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word;
+                          max-height:260px; overflow:auto; }}
+  .log {{ background:#0f172a; color:#94a3b8; border-radius:8px; padding:8px 10px; font-size:11.5px;
+          font-family:Consolas,"Courier New",monospace; white-space:pre-wrap; word-break:break-word;
+          margin:0 0 10px; max-height:150px; overflow:auto; }}
+  .fh {{ font-size:12.5px; font-weight:700; margin:4px 0 6px; }}
+  .fld {{ width:100%; border-collapse:collapse; font-size:12.5px; margin-bottom:10px; background:var(--card);
+          border:1px solid var(--line); border-radius:8px; overflow:hidden; }}
+  .fld th, .fld td {{ text-align:right; padding:6px 10px; border-bottom:1px solid var(--line); vertical-align:top; }}
+  .fld th {{ width:32%; color:var(--mut); font-weight:600; background:var(--softer); }}
+  .fld tr.inf td {{ background:#fffbe6; }}
+  .tag {{ display:inline-block; background:var(--rib-y-bg); color:var(--rib-y-ink); border-radius:9999px;
+          padding:1px 8px; font-size:11px; font-weight:700; margin-right:6px; }}
+  .rv {{ font-size:12px; line-height:1.5; background:var(--card); border:1px solid var(--line); border-radius:8px;
+         padding:8px 10px; white-space:pre-wrap; max-height:260px; overflow:auto; margin-bottom:10px; }}
+  .shot {{ display:block; margin-bottom:10px; }}
+  .shot img {{ max-width:100%; max-height:240px; object-fit:contain; border:1px solid var(--line);
+               border-radius:8px; cursor:zoom-in; display:block; }}
+  .hist {{ margin:6px 0 10px; display:flex; flex-direction:column; gap:6px; }}
+  .bub {{ border-radius:10px; padding:8px 11px; max-width:92%; border:1px solid var(--line); }}
+  .bub.codex {{ background:var(--softer); align-self:flex-start; }}
+  .bub.me {{ background:#eef6ff; border-color:#cfe3f7; align-self:flex-end; }}
+  .reply textarea {{ width:100%; resize:vertical; min-height:48px; font:inherit; font-size:13px;
+                     background:var(--card); color:inherit; border:1px solid var(--line2); border-radius:8px;
+                     padding:9px 11px; margin-bottom:6px; }}
+  .rrow {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }}
+  .sv {{ font-size:12px; color:var(--mut); display:flex; gap:6px; align-items:center; margin-left:auto; }}
+  .acts {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+  @media (pointer:coarse) {{ .btn {{ padding:12px 15px; }} .f {{ padding:12px 16px; }} }}
+</style>
+</head>
+<body>
+{sidebar_html("live", jobs_n, archived_n)}
+<main>
+<div class="wrap">
+  <h1>הגשות לייב</h1>
+  <div class="sub">כל טופס ש-Codex עובד עליו: מה מילא, מה הוא שואל, ומה לעשות הלאה - אישור, תיקון או תשובה, מכאן (גם מהטלפון). מתעדכן לבד.</div>
+  <div class="note" id="busy">Codex עסוק עכשיו בהגשה אחרת - תשובות יישלחו כשיתפנה (לחץ שוב אם נדחית).</div>
+  <div class="fbar">
+    <button class="f on" onclick="setFilt('attn', this)">מחכה לי <span class="cnt" id="cnt-attn">0</span></button>
+    <button class="f" onclick="setFilt('run', this)">רץ עכשיו <span class="cnt" id="cnt-run">0</span></button>
+    <button class="f" onclick="setFilt('all', this)">הכל <span class="cnt" id="cnt-all">0</span></button>
+  </div>
+  <div id="list"><div class="panel mut">מתחבר לשרת...</div></div>
+</div>
+</main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+{LIVE_PAGE_JS}
+{SIDE_JS}
+</script>
+</body>
+</html>"""
+
+
 def render_md(text):
     """Tiny markdown -> HTML for profile.md (headings, bullets, bold)."""
     import re as _re
@@ -1617,11 +2044,12 @@ def main():
     jobs, archived = load_jobs()
     OUT.write_text(build(jobs, archived), encoding="utf-8")
     (ROOT / "archive.html").write_text(build_archive(load_archive(), len(jobs)), encoding="utf-8")
+    (ROOT / "submissions.html").write_text(build_submissions(len(jobs), archived), encoding="utf-8")
     try:
         (ROOT / "profile.html").write_text(build_profile(len(jobs), archived), encoding="utf-8")
     except Exception as e:  # noqa: BLE001 - a malformed master-cv must not kill the rebuild
         print(f"profile page skipped: {e}")
-    print(f"dashboard: {OUT} ({len(jobs)} jobs, {archived} archived) + archive.html + profile.html")
+    print(f"dashboard: {OUT} ({len(jobs)} jobs, {archived} archived) + archive.html + submissions.html + profile.html")
 
 
 if __name__ == "__main__":

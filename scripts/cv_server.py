@@ -25,6 +25,16 @@ Endpoints:
                           published for this job, for remote/phone review
   GET /submit-approve?id=N -> user approved the summary: resume the job's
                           Codex session so it clicks Submit in the open tab
+  GET /submissions     -> every submission Codex touched (persisted in
+                          output/submissions/<id>.json): status, Codex's last
+                          full message, its open QUESTION, parsed review
+                          fields, screenshot, chat history - drives the
+                          "הגשות לייב" page
+  POST /submit-reply   -> body {"id": N, "text": "...", "save_answer": bool}:
+                          free-text reply to Codex (answer a QUESTION, ask for
+                          a field change, ...) - resumes the job's session
+  GET /submit-cancel?id=N  -> drop the submission (nothing is sent)
+  GET /submit-dismiss?id=N -> hide a finished record from the live page
   GET /scan?mode=cheap|full -> runs the weekly-job-scan routine NOW in headless
                           Claude (the same SKILL.md the scheduled task uses).
                           cheap = the daily HTTP-only freshness check;
@@ -52,7 +62,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
-PORT = 8765
+PORT = int(os.environ.get("CV_PORT") or 8765)  # CV_PORT: run a test instance beside the real one
 TIMEOUT_SEC = 1500  # 25 min per generation
 
 
@@ -250,7 +260,9 @@ def run_generate(job_id):
         cmd = [
             claude, "-p", prompt,
             "--permission-mode", "acceptEdits",
-            "--allowedTools", "Bash,WebFetch,WebSearch,Read,Write,Edit,Glob,Grep,Skill,TodoWrite",
+            # Agent/Task: the generate-cv skill spawns the CV review subagent
+            "--allowedTools",
+            "Bash,WebFetch,WebSearch,Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Agent,Task",
             "--output-format", "stream-json", "--verbose",
         ]
     try:
@@ -409,6 +421,82 @@ def pending_file(job_id):
     return ROOT / "output" / f".needs_input_{job_id}.txt"
 
 
+# ---------------------------------------------------------------- submission records
+# One JSON per job under output/submissions/: everything the "הגשות לייב" page
+# shows - status, Codex's last full message, its open question, the parsed
+# review fields, and the back-and-forth history. Survives server restarts.
+SUB_DIR = ROOT / "output" / "submissions"
+sub_lock = threading.Lock()
+
+
+def sub_file(job_id):
+    return SUB_DIR / f"{job_id}.json"
+
+
+def load_sub(job_id):
+    try:
+        return json.loads(sub_file(job_id).read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def save_sub(job_id, **fields):
+    """Merge fields into the job's submission record (creates it)."""
+    with sub_lock:
+        rec = load_sub(job_id) or {"id": job_id, "history": []}
+        rec.update(fields)
+        rec["updated"] = time.time()
+        try:
+            SUB_DIR.mkdir(parents=True, exist_ok=True)
+            sub_file(job_id).write_text(json.dumps(rec, ensure_ascii=False, indent=1),
+                                        encoding="utf-8")
+        except OSError:
+            pass
+        return rec
+
+
+def sub_note(job_id, who, text, kind=""):
+    """Append one turn ('codex' or 'me') to the record's history."""
+    text = str(text or "").strip()
+    if not text:
+        return
+    with sub_lock:
+        rec = load_sub(job_id) or {"id": job_id, "history": []}
+        rec.setdefault("history", []).append(
+            {"ts": time.time(), "who": who, "kind": kind, "text": text[:6000]})
+        rec["history"] = rec["history"][-40:]
+        rec["updated"] = time.time()
+        try:
+            SUB_DIR.mkdir(parents=True, exist_ok=True)
+            sub_file(job_id).write_text(json.dumps(rec, ensure_ascii=False, indent=1),
+                                        encoding="utf-8")
+        except OSError:
+            pass
+
+
+def parse_review_fields(txt):
+    """'Field label: value entered' lines -> [{label, value, inferred}]."""
+    out = []
+    for line in (txt or "").splitlines():
+        s = line.strip().lstrip("-*• ").strip()
+        if not s or ":" not in s:
+            continue
+        label, _, value = s.partition(":")
+        label, value = label.strip(), value.strip()
+        if not label or len(label) > 80:
+            continue
+        inferred = "[inferred]" in value.lower()
+        value = re.sub(r"\s*\[inferred\]\s*", " ", value, flags=re.I).strip()
+        out.append({"label": label, "value": value, "inferred": inferred})
+    return out
+
+
+def question_of(status, detail):
+    """The text Codex wants answered, without the protocol token."""
+    return re.sub(r"^(QUESTION|NEEDS_INPUT|READY_FOR_REVIEW|LOGIN_REQUIRED|FAILED):?\s*",
+                  "", str(detail or "")).strip()
+
+
 ANSWERS_FILE = ROOT / "application-answers.md"
 DASH_ANS_HEADER = "## Answers added from the dashboard"
 answers_lock = threading.Lock()
@@ -537,7 +625,12 @@ def build_submit_prompt(job, mode="review"):
         intro = ("Fill the application form completely and, once everything is "
                  "verified correct against the data sources, submit it YOURSELF - "
                  "the user has pre-approved autonomous submission for THIS run "
-                 "(full-auto mode; they are often away from the computer).")
+                 "(full-auto mode; they are often away from the computer). "
+                 "THIS RUN IS THE ACTION-TIME CONFIRMATION: the user clicked "
+                 "'submit' for this specific job on their dashboard after "
+                 "reviewing it, so selecting their Google account, transmitting "
+                 "the applicant data below and pressing Submit are all already "
+                 "approved - do not stop to ask for that confirmation again.")
         step1 = "Open the posting URL in Chrome."
         step7 = ("Everything filled -> re-read the whole form once, verify every "
                  "field against the data sources, then click the final "
@@ -556,7 +649,10 @@ def build_submit_prompt(job, mode="review"):
         intro = ("Fill the application form completely, verify it against the "
                  "data sources, then STOP at the final review step and finish "
                  "immediately - the USER approves later from their dashboard "
-                 "(review mode). You NEVER click the final Submit button.")
+                 "(review mode). You NEVER click the final Submit button. "
+                 "Selecting the user's Google account and entering the applicant "
+                 "data below into the form are already approved (the user "
+                 "started this run for this job) - no confirmation needed for that.")
         step1 = ("Open the posting URL in a NEW Chrome tab and do all the work "
                  "in that tab. Leave the tab OPEN when you finish - the user "
                  "will return to it.")
@@ -603,10 +699,13 @@ STEPS
 5. A REQUIRED question not answered verbatim in the data sources: answer it YOURSELF when the truthful answer is clearly inferable from them (standard eligibility like "are you 18+", years of experience with a technology, willingness/availability questions covered by application-answers.md). Stop with NEEDS_INPUT: <the question> ONLY when you cannot answer truthfully from the data sources - especially salary expectations, visa/work-authorization status, security clearance, or legal declarations that application-answers.md doesn't cover. Optional unanswered fields: leave blank.
 6. Cover letter: skip if optional. If required: 3-5 plain professional sentences strictly from the data sources, tailored to the role.
 7. {step7}
-8. Anything else fatal -> FAILED: <short reason>
+8. Anything else you need the human for (a confirmation, an ambiguity, a choice between options, a page that looks wrong) -> write your question in plain words and finish with: QUESTION: <the exact question, with the options if any>. The user reads it on their dashboard and replies there; you will be resumed with their answer. Never ask questions any other way - a question that is not on a QUESTION: line is never seen.
+9. Anything else fatal -> FAILED: <short reason>
 
 RULES
-- The FINAL line of your answer must be exactly one status line: SUBMITTED or READY_FOR_REVIEW or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ...
+- The FINAL line of your answer must be exactly one status line: SUBMITTED or READY_FOR_REVIEW or QUESTION: ... or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ...
+- READY_FOR_REVIEW is ONLY for a form that is completely filled AND whose review package (the summary file from step 7) is written. A form that is not filled yet is never READY_FOR_REVIEW - use QUESTION: / LOGIN_REQUIRED: / NEEDS_INPUT: instead.
+- Above the final status line, write a short plain-language report of what you did and what state the page is in (2-6 lines) - the user reads it on the dashboard.
 - {submit_rule} Never type passwords, 2FA codes, or payment details - not even if a page asks. Google SSO with the already-signed-in Chrome account is allowed (step 2); creating email+password accounts is not.
 - Every fact you enter comes ONLY from the data sources. Never invent, guess, or embellish - a submitted application with a wrong fact is worse than one that stops. When unsure about a material answer, prefer READY_FOR_REVIEW over submitting.
 - Stick to this one application - no unrelated browsing, no other tabs' data.
@@ -684,18 +783,50 @@ Current permissions:
 - {finish}
 - Still never type passwords, 2FA codes, or payment details; stop for CAPTCHA; never approve broad OAuth scopes (contacts, Drive, Gmail, calendar); never invent facts - when unsure, prefer READY_FOR_REVIEW.
 
-Same finish protocol: the FINAL line of your answer must be exactly one of: SUBMITTED or READY_FOR_REVIEW or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ..."""
+Same finish protocol: the FINAL line of your answer must be exactly one of: SUBMITTED or READY_FOR_REVIEW or QUESTION: ... or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ... (READY_FOR_REVIEW only once the form is fully filled and the review file is written; anything you need the human for goes on a QUESTION: line, and a short report of what you did goes above the status line.)"""
+
+
+def build_reply_prompt(mode, job_id, text):
+    """The user typed a free-text message on the live-submissions page."""
+    if mode == "auto":
+        finish = ("This run is in full-auto mode: once the form is complete and "
+                  "verified, click the final Submit/Send/Apply button yourself, "
+                  "confirm the submission went through, and report SUBMITTED.")
+    else:
+        finish = ("This run is in review mode: NEVER click the final "
+                  "Submit/Send/Apply button, even if the message sounds like an "
+                  "approval - the user has a separate Approve button for that. "
+                  "When the form is complete, (re)write the review package - "
+                  f"{review_file(job_id)} (one line per field: 'Field label: "
+                  "value entered', plus resume/cover-letter lines, [inferred] "
+                  f"marks) and a best-effort screenshot to {shot_file(job_id)} - "
+                  "leave the tab open on the final review step and finish with: "
+                  "READY_FOR_REVIEW: form ready in its tab, awaiting dashboard approval.")
+    return f"""The user replied to you from their dashboard (may be Hebrew - translate to the form's language when you need to type it):
+
+\"\"\"{text}\"\"\"
+
+Treat it as their answer / instruction: if it answers your question, act on it; if it asks to change or fix something in the form, re-check the open application page in Chrome, make exactly that change, and re-verify the page; if it is a new fact about the applicant, use it only for this form (it is NOT in the data sources). Then continue exactly where you stopped.
+
+Current permissions:
+- Google SSO with the Chrome profile's signed-in account ({ACCOUNT_EMAIL}) is allowed, including first-time portal account creation and basic identity consent (name, email, profile picture, openid). Entering the applicant's data into this form is already approved.
+- Answer required questions yourself when the truthful answer is clearly inferable from the data sources or from the user's message; stop with NEEDS_INPUT only for salary / visa / security-clearance / legal questions not covered anywhere.
+- {finish}
+- Still never type passwords, 2FA codes, or payment details; stop for CAPTCHA; never approve broad OAuth scopes (contacts, Drive, Gmail, calendar); never invent facts.
+
+Finish protocol: write 2-6 plain lines on what you did and the page's state, then the FINAL line must be exactly one of: SUBMITTED or READY_FOR_REVIEW or QUESTION: ... or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ... (anything you need the human for goes on a QUESTION: line.)"""
 
 
 def build_approve_prompt(job_id):
     return f"""The user reviewed your field-by-field summary on the dashboard and APPROVED submission. In Chrome, verify the application form you filled is still open and intact (re-open the tab if needed; if the form lost its data, refill it from the same data sources as before). Then click the final Submit/Send/Apply button, verify the submission actually went through (thank-you page, "application submitted/received", confirmation number), and finish with: SUBMITTED.
-Still never type passwords, 2FA codes, or payment details; stop for CAPTCHA (CAPTCHA_REQUIRED) or a login wall (LOGIN_REQUIRED: <portal>); if something material looks wrong, do NOT submit - finish with: READY_FOR_REVIEW: <why>.
-The FINAL line of your answer must be exactly one of: SUBMITTED or READY_FOR_REVIEW or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ..."""
+Still never type passwords, 2FA codes, or payment details; stop for CAPTCHA (CAPTCHA_REQUIRED) or a login wall (LOGIN_REQUIRED: <portal>); if something material looks wrong, do NOT submit - describe it and finish with: QUESTION: <what looks wrong and what you need decided>.
+Write 2-6 plain lines on what happened (confirmation text / number if any), then the FINAL line must be exactly one of: SUBMITTED or READY_FOR_REVIEW or QUESTION: ... or LOGIN_REQUIRED: ... or CAPTCHA_REQUIRED or NEEDS_INPUT: ... or FAILED: ..."""
 
 
 STATUS_TOKENS = [
     ("SUBMITTED", "submitted"),
     ("READY_FOR_REVIEW", "ready"),
+    ("QUESTION", "question"),
     ("LOGIN_REQUIRED", "login"),
     ("CAPTCHA_REQUIRED", "captcha"),
     ("NEEDS_INPUT", "needs_input"),
@@ -703,7 +834,8 @@ STATUS_TOKENS = [
 ]
 
 
-def run_submit(job_id, resume=False, mode="review", approve=False, answer_note=None):
+def run_submit(job_id, resume=False, mode="review", approve=False, answer_note=None,
+               reply_text=None):
     job = get_job_row(job_id)
     if not job:
         return set_sub(job_id, "error", f"job {job_id} not found")
@@ -713,7 +845,9 @@ def run_submit(job_id, resume=False, mode="review", approve=False, answer_note=N
     lastmsg = ROOT / "output" / f".submit_last_{job_id}.txt"
     if os.environ.get("CV_DRYRUN"):
         cmd = [sys.executable, "-c",
-               "import time; time.sleep(2); print('READY_FOR_REVIEW')"]
+               "import time; time.sleep(2); print('dry run - nothing filled\\nQUESTION: dry-run question?')"]
+        if resume or approve:
+            mode = (sub_sessions.get(job_id) or {}).get("mode", mode)
     else:
         codex = find_codex()
         if not codex:
@@ -724,8 +858,12 @@ def run_submit(job_id, resume=False, mode="review", approve=False, answer_note=N
                 return set_sub(job_id, "error",
                                "אין ריצת Codex קודמת למשרה הזאת - הרץ 🚀 הגש רגיל")
             mode = entry.get("mode", "review")  # a resume keeps its run's mode
-            prompt = (build_approve_prompt(job_id) if approve
-                      else build_continue_prompt(mode, job_id, answer_note))
+            if approve:
+                prompt = build_approve_prompt(job_id)
+            elif reply_text:
+                prompt = build_reply_prompt(mode, job_id, reply_text)
+            else:
+                prompt = build_continue_prompt(mode, job_id, answer_note)
             cmd = [codex, "exec", "resume", "--skip-git-repo-check",
                    "-o", str(lastmsg), entry["sid"], prompt]
         else:
@@ -738,10 +876,20 @@ def run_submit(job_id, resume=False, mode="review", approve=False, answer_note=N
     if not submit_running.acquire(blocking=False):
         return set_sub(job_id, "busy", "הגשה אחרת רצה כרגע - חכה שתסתיים")
     verb = ("שליחה מאושרת" if approve
+            else "תשובה ל-Codex" if reply_text
             else "המשך הגשה" if resume else "הגשת מועמדות")
     if not approve:
         verb += {"auto": " (אוטומטי)", "review": " (הכנה)"}.get(mode, "")
     t = new_task("codex", job_id, f"{verb} למשרה #{job_id} ({job['company']})")
+    if not (resume or approve):
+        # fresh run -> fresh record (the old conversation is gone with the session)
+        with sub_lock:
+            sub_file(job_id).unlink(missing_ok=True)
+    save_sub(job_id, company=str(job["company"] or ""), title=str(job["title"] or ""),
+             link=str(job["link"] or ""), mode=mode, status="running", detail="",
+             question="", task_key=t["key"], started=t["started"], dismissed=False)
+    if approve:
+        sub_note(job_id, "me", "אישרתי - שלח את הטופס", "approve")
 
     def filt(line):
         m = SESSION_RE.search(line)
@@ -766,37 +914,93 @@ def run_submit(job_id, resume=False, mode="review", approve=False, answer_note=N
                 line = out[pos:].splitlines()[0].strip()
                 best = (pos, status, line)
         if best:
-            set_sub(job_id, best[1], best[2])
-            end_task(t, best[1], best[2])
-            if best[1] == "needs_input":
+            status, line = best[1], best[2]
+            # "ready" without a review package = Codex asked for something in
+            # prose (typically a confirmation) - surface it as a question so the
+            # dashboard never shows "approve & send" for an unfilled form
+            if status == "ready" and not review_file(job_id).exists():
+                status = "question"
+                line = "QUESTION: " + (question_of("ready", line) or
+                                       "Codex עצר לפני שמילא את הטופס - קרא את ההודעה שלו וענה")
+            set_sub(job_id, status, line)
+            end_task(t, status, line)
+            # the message above the status line is Codex's report to the user
+            report = out[:best[0]].strip()[-4000:]
+            sub_note(job_id, "codex", (report + "\n" + line).strip(), status)
+            save_sub(job_id, status=status, detail=line, last_message=out[-6000:],
+                     question=question_of(status, line) if status in
+                     ("question", "needs_input", "login", "captcha", "error") else "")
+            if status == "needs_input":
                 # persist the question so the dashboard shows the answer box
                 # even after a reload / server restart
                 try:
-                    q = re.sub(r"^NEEDS_INPUT:?\s*", "", best[2]).strip()
+                    q = re.sub(r"^NEEDS_INPUT:?\s*", "", line).strip()
                     pending_file(job_id).write_text(q, encoding="utf-8")
                 except OSError:
                     pass
-            elif best[1] in ("submitted", "ready"):
+            elif status in ("submitted", "ready"):
                 pending_file(job_id).unlink(missing_ok=True)
-            if best[1] == "submitted":
+            if status == "submitted":
                 for p in (review_file(job_id), shot_file(job_id)):
                     p.unlink(missing_ok=True)
                 set_job_status(job_id, "הוגש")
         elif t.get("stop_requested"):
             set_sub(job_id, "error", "נעצר ידנית")
             end_task(t, "error", "")
+            save_sub(job_id, status="error", detail="נעצר ידנית", last_message=out[-6000:])
+            sub_note(job_id, "codex", "(נעצר ידנית)", "error")
         else:
             msg = f"codex exit {rc}, no status line: {out[-400:]}"
             set_sub(job_id, "error", msg)
             end_task(t, "error", msg)
+            save_sub(job_id, status="error", detail=msg, last_message=out[-6000:],
+                     question="")
+            sub_note(job_id, "codex", out[-1500:] or msg, "error")
     except subprocess.TimeoutExpired:
         set_sub(job_id, "error", f"timeout after {SUBMIT_TIMEOUT_SEC}s")
         end_task(t, "error", f"timeout after {SUBMIT_TIMEOUT_SEC}s")
+        save_sub(job_id, status="error", detail=f"timeout after {SUBMIT_TIMEOUT_SEC}s")
     except Exception as e:  # noqa: BLE001
         set_sub(job_id, "error", str(e))
         end_task(t, "error", str(e))
+        save_sub(job_id, status="error", detail=str(e))
     finally:
         submit_running.release()
+
+
+def list_submissions():
+    """Every persisted record + derived bits the live page needs."""
+    out = []
+    if not SUB_DIR.exists():
+        return out
+    for p in sorted(SUB_DIR.glob("*.json")):
+        m = re.fullmatch(r"(\d+)\.json", p.name)
+        if not m:
+            continue
+        job_id = int(m.group(1))
+        rec = load_sub(job_id)
+        if not rec:
+            continue
+        with lock:
+            live = subs.get(job_id, {}).get("status")
+        # the in-memory state wins while a run is alive (the file lags a bit)
+        if live == "running":
+            rec["status"] = "running"
+        rv = review_file(job_id)
+        if rv.exists():
+            try:
+                txt = rv.read_text(encoding="utf-8", errors="replace").strip()
+                rec["review"] = txt[-8000:]
+                rec["fields"] = parse_review_fields(txt)
+            except OSError:
+                pass
+        shot = shot_file(job_id)
+        rec["shot"] = (f"output/{shot.name}?t={int(shot.stat().st_mtime)}"
+                       if shot.exists() else None)
+        rec["resumable"] = job_id in sub_sessions
+        out.append(rec)
+    out.sort(key=lambda r: -(r.get("updated") or 0))
+    return out
 
 
 # ---------------------------------------------------------------- batch pipeline
@@ -1080,7 +1284,8 @@ def set_job_status(job_id, status):
 
 # Pages served over HTTP so phones/other devices can load the dashboard
 # (opening dashboard.html from file:// still works as before).
-STATIC_PAGES = {"dashboard.html", "archive.html", "profile.html", "report.html"}
+STATIC_PAGES = {"dashboard.html", "archive.html", "profile.html", "report.html",
+                "submissions.html"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1227,6 +1432,14 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 return self._json(200, dict(scan_state))
 
+        if u.path == "/submissions":
+            recs = list_submissions()
+            attn = sum(1 for r in recs if not r.get("dismissed") and
+                       r.get("status") in ("question", "ready", "login", "captcha",
+                                           "needs_input"))
+            return self._json(200, {"submissions": recs, "attention": attn,
+                                    "busy": submit_running.locked(), "now": time.time()})
+
         if u.path == "/pending":
             out = []
             for p in sorted((ROOT / "output").glob(".needs_input_*.txt")):
@@ -1314,6 +1527,26 @@ class Handler(BaseHTTPRequestHandler):
                              kwargs={"approve": True}, daemon=True).start()
             return self._json(200, {"ok": True, "via": "resume"})
 
+        if u.path == "/submit-cancel":
+            with lock:
+                alive = subs.get(job_id, {}).get("status") == "running"
+            if alive:
+                return self._json(200, {"ok": False,
+                                        "detail": "Codex עדיין רץ - עצור אותו מהקונסול קודם"})
+            for p in (review_file(job_id), shot_file(job_id), pending_file(job_id)):
+                p.unlink(missing_ok=True)
+            with lock:
+                subs.pop(job_id, None)
+            save_sub(job_id, status="cancelled", detail="בוטל מהדשבורד", question="")
+            sub_note(job_id, "me", "ביטלתי את ההגשה (הטופס לא נשלח)", "cancel")
+            return self._json(200, {"ok": True})
+
+        if u.path == "/submit-dismiss":
+            if not load_sub(job_id):
+                return self._json(404, {"ok": False, "detail": "no record"})
+            save_sub(job_id, dismissed=True)
+            return self._json(200, {"ok": True})
+
         if u.path == "/set-status":
             status = parse_qs(u.query).get("status", [""])[0]
             if status not in ALLOWED_STATUSES:
@@ -1338,7 +1571,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
-        if u.path != "/submit-answer":
+        if u.path not in ("/submit-answer", "/submit-reply"):
             return self._json(404, {"error": "not found"})
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -1347,7 +1580,8 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(n).decode("utf-8", "replace"))
             job_id = int(data["id"])
             question = str(data.get("question") or "").strip()
-            answer = str(data.get("answer") or "").strip()
+            answer = str(data.get("answer") or data.get("text") or "").strip()
+            save_answer = bool(data.get("save_answer"))
         except (ValueError, KeyError, TypeError):
             return self._json(400, {"error": "bad request"})
         if not answer:
@@ -1361,9 +1595,36 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             job = None
         company = (job or {}).get("company") or ""
+
+        if u.path == "/submit-reply":
+            # free-text message to Codex (answer to its QUESTION, a fix request,
+            # ...). Not a standing answer unless the user ticked "save".
+            if not sub_sessions.get(job_id):
+                return self._json(400, {"ok": False,
+                                        "detail": "אין ריצת Codex להמשיך - הרץ הגשה קודם"})
+            if submit_running.locked():
+                return self._json(200, {"ok": False,
+                                        "detail": "הגשה אחרת רצה כרגע - נסה שוב כשתסתיים"})
+            sub_note(job_id, "me", answer, "reply")
+            rec = load_sub(job_id) or {}
+            if save_answer:
+                q = rec.get("question") or question
+                ok, detail, raw_line = record_answer(job_id, company, q, answer)
+                if ok:
+                    threading.Thread(target=run_polish_answer,
+                                     args=(job_id, company, (job or {}).get("title") or "",
+                                           raw_line, q, answer), daemon=True).start()
+            pending_file(job_id).unlink(missing_ok=True)
+            with lock:
+                subs[job_id] = {"status": "running", "detail": ""}
+            threading.Thread(target=run_submit, args=(job_id, True),
+                             kwargs={"reply_text": answer}, daemon=True).start()
+            return self._json(200, {"ok": True, "resumed": True})
+
         ok, detail, raw_line = record_answer(job_id, company, question, answer)
         if not ok:
             return self._json(500, {"ok": False, "detail": detail})
+        sub_note(job_id, "me", (f"{question}\n-> " if question else "") + answer, "answer")
         pending_file(job_id).unlink(missing_ok=True)
         # resume the same Codex session with the fresh answer, unless another
         # Chrome-driving run holds the lock (then the card's המשך button works)
