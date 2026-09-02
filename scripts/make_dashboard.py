@@ -208,7 +208,9 @@ def build(jobs, archived=0):
             left = STALE_NEW_DAYS - age
             if left <= 0:
                 ribbon = '<span class="rib rib-y">ייכנס לארכיון בסריקה הבאה</span>'
-            elif left <= 7:
+            elif left == 1:
+                ribbon = '<span class="rib rib-y">ארכוב מחר - להגיש או לדלג</span>'
+            elif left <= 3:
                 ribbon = f'<span class="rib rib-y">ארכוב בעוד {left} ימים - להגיש או לדלג</span>'
         sub_meta = ""
         sub_d = parse_d(j["submitted"])
@@ -1263,7 +1265,9 @@ loadPending();
 (() => {{
   const el = document.getElementById("submode");
   if (!el) return;
-  el.checked = localStorage.getItem("submode") === "auto";
+  // default = full auto (Lidor 2026-09-02: "I want full automation"); the
+  // switch still turns review mode back on and that choice sticks
+  el.checked = localStorage.getItem("submode") !== "review";
   el.onchange = () => {{
     localStorage.setItem("submode", el.checked ? "auto" : "review");
     applyMode();
@@ -1407,8 +1411,8 @@ def sidebar_html(active, jobs_n, archived_n):
   </nav>
   <div class="sidegrow"></div>
   <div class="sideact">
-    <label class="swrow" title="כבוי: Codex ממלא ועוצר - אתה בודק בכרום ולוחץ Submit. דלוק: Codex גם מגיש בעצמו. חל על כפתור ההגשה בכרטיס וגם על הגש נבחרות">
-      <input type="checkbox" id="submode">
+    <label class="swrow" title="דלוק (ברירת מחדל): Codex ממלא וגם מגיש בעצמו, עוצר רק על מה שהוא באמת לא יכול. כבוי: ממלא ועוצר לפני השליחה - אתה מאשר מהדשבורד. חל על כפתור ההגשה בכרטיס וגם על הגש נבחרות">
+      <input type="checkbox" id="submode" checked>
       <span class="sw"></span>
       <span class="swtxt">{IC_BOLT} Codex מגיש לבד</span>
     </label>
@@ -1449,7 +1453,7 @@ scanPoll();
 (() => {
   const el = document.getElementById("submode");
   if (!el) return;
-  el.checked = localStorage.getItem("submode") === "auto";
+  el.checked = localStorage.getItem("submode") !== "review";  // default: full auto
   el.onchange = () => localStorage.setItem("submode", el.checked ? "auto" : "review");
 })();
 """
