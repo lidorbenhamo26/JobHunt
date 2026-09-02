@@ -43,6 +43,11 @@ Endpoints:
                           does NOT touch .last-full-scan - the real Sunday scan
                           with browser tools still happens.
   GET /scan-status     -> {"status": "idle"|"running"|"done"|"error", ...}
+  POST /add-job        -> body {"url": "...", "text": "...", "source": "..."}:
+                          a job Lidor found himself (LinkedIn / WhatsApp / a
+                          board / a friend). Headless Claude runs /add-job:
+                          fetches + scores it and appends it to the tracker.
+                          Returns {"key": ...}; poll GET /add-status?key=...
 
 Start: start-cv-server.bat (or: python scripts\cv_server.py)
 Set CV_DRYRUN=1 to test the plumbing without calling Claude/Codex.
@@ -391,6 +396,99 @@ def run_scan(mode):
             scan_lock.release()
         except RuntimeError:
             pass
+
+
+# ---------------------------------------------------------------- add a job by hand
+# "הוסף משרה" on the dashboard: Lidor pastes a link (or the text of a WhatsApp
+# post) and headless Claude runs the add-job skill - fetch, score per
+# profile.md, append via add_jobs.py, rebuild. The skill writes a small result
+# file so the dashboard can say exactly what was added.
+ADD_TIMEOUT_SEC = 900
+adds = {}  # key -> {"status", "detail", "result"}
+
+
+def add_result_file(key):
+    return ROOT / "output" / f".add_result_{key}.json"
+
+
+def run_add_job(key, url, text, source):
+    label = "הוספת משרה מקישור" if url else "הוספת משרה מטקסט"
+    t = new_task("claude", 0, label + (f" ({source})" if source else ""))
+    with lock:
+        adds[key] = {"status": "running", "detail": "", "key": key, "task_key": t["key"]}
+    res_file = add_result_file(key)
+    res_file.unlink(missing_ok=True)
+    line_filter = claude_line_filter
+    if os.environ.get("CV_DRYRUN"):
+        line_filter = None
+        payload = json.dumps({"status": "added", "id": 999, "company": "Dry Run Ltd",
+                              "title": "Software Engineer", "score": 7,
+                              "detail": "dry run"}, ensure_ascii=False)
+        cmd = [sys.executable, "-c",
+               f"import time,io; time.sleep(2); io.open(r'{res_file}','w',encoding='utf-8').write({payload!r})"]
+    else:
+        claude = find_claude()
+        if not claude:
+            with lock:
+                adds[key].update(status="error", detail="claude CLI not found")
+            end_task(t, "error", "claude CLI not found")
+            return
+        # the pasted text travels through a file - never inline Hebrew on the command line
+        text_file = ROOT / "output" / f".add_text_{key}.txt"
+        text_file.write_text(text or "", encoding="utf-8")
+        prompt = (f"/add-job url={url or '(none)'} source={source or '(unknown)'} "
+                  f"text_file={text_file} result_file={res_file} "
+                  "(headless run from the dashboard: no browser tools, no questions, "
+                  "run fully autonomously; WebFetch/curl only)")
+        cmd = [claude, "-p", prompt,
+               "--permission-mode", "acceptEdits",
+               "--allowedTools", "Bash,WebFetch,WebSearch,Read,Write,Edit,Glob,Grep,Skill,TodoWrite",
+               "--output-format", "stream-json", "--verbose"]
+    try:
+        rc, out = run_streamed(cmd, t, ADD_TIMEOUT_SEC, line_filter)
+        result = None
+        if res_file.exists():
+            try:
+                result = json.loads(res_file.read_text(encoding="utf-8-sig"))
+            except ValueError:
+                result = None
+            res_file.unlink(missing_ok=True)
+        if result and result.get("status") == "added":
+            msg = (f"נוספה #{result.get('id', '?')}: {result.get('company', '')} - "
+                   f"{result.get('title', '')} (ציון {result.get('score', '?')})")
+            with lock:
+                adds[key].update(status="done", detail=msg, result=result)
+            end_task(t, "done", msg)
+        elif result and result.get("status") == "duplicate":
+            msg = f"כבר קיימת בלוח: {result.get('detail', '')}".strip()
+            with lock:
+                adds[key].update(status="duplicate", detail=msg, result=result)
+            end_task(t, "done", msg)
+        elif result:
+            msg = f"לא נוספה: {result.get('detail', '')}".strip()
+            with lock:
+                adds[key].update(status="error", detail=msg, result=result)
+            end_task(t, "error", msg)
+        elif t.get("stop_requested"):
+            with lock:
+                adds[key].update(status="error", detail="נעצר ידנית")
+            end_task(t, "error", "")
+        else:
+            msg = f"claude exit {rc}, no result file: {out.strip()[-300:]}"
+            with lock:
+                adds[key].update(status="error", detail=msg)
+            end_task(t, "error", msg)
+    except subprocess.TimeoutExpired:
+        with lock:
+            adds[key].update(status="error", detail=f"timeout after {ADD_TIMEOUT_SEC}s")
+        end_task(t, "error", f"timeout after {ADD_TIMEOUT_SEC}s")
+    except Exception as e:  # noqa: BLE001
+        with lock:
+            adds[key].update(status="error", detail=str(e))
+        end_task(t, "error", str(e))
+    finally:
+        if not os.environ.get("CV_DRYRUN"):
+            (ROOT / "output" / f".add_text_{key}.txt").unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- submit (Codex)
@@ -1435,6 +1533,12 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 return self._json(200, dict(scan_state))
 
+        if u.path == "/add-status":
+            key = parse_qs(u.query).get("key", [""])[0]
+            with lock:
+                st = adds.get(key)
+            return self._json(200 if st else 404, st or {"status": "unknown"})
+
         if u.path == "/submissions":
             recs = list_submissions()
             attn = sum(1 for r in recs if not r.get("dismissed") and
@@ -1574,6 +1678,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path == "/add-job":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= 60000:
+                    return self._json(400, {"ok": False, "detail": "bad length"})
+                data = json.loads(self.rfile.read(n).decode("utf-8", "replace"))
+                url = str(data.get("url") or "").strip()
+                text = str(data.get("text") or "").strip()
+                source = re.sub(r"[^\w \-/.()א-ת]", "", str(data.get("source") or ""))[:40]
+            except (ValueError, TypeError):
+                return self._json(400, {"ok": False, "detail": "bad request"})
+            if url and not re.match(r"^https?://\S+$", url):
+                return self._json(400, {"ok": False, "detail": "זה לא נראה כמו קישור (חייב להתחיל ב-http)"})
+            if not url and len(text) < 30:
+                return self._json(400, {"ok": False,
+                                        "detail": "צריך קישור, או טקסט של המודעה (לפחות כמה שורות)"})
+            key = f"add-{int(time.time() * 1000)}"
+            threading.Thread(target=run_add_job, args=(key, url, text, source),
+                             daemon=True).start()
+            return self._json(200, {"ok": True, "key": key})
         if u.path not in ("/submit-answer", "/submit-reply"):
             return self._json(404, {"error": "not found"})
         try:

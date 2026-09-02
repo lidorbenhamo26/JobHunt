@@ -43,6 +43,7 @@ IC_BOLT = _svg("M7 2v11h3v9l7-12h-4l4-8H7z")
 IC_DOC = _svg("M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z")
 IC_SEARCH = _svg("M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z")
 IC_SEND = _svg("M2.01 21L23 12 2.01 3 2 10l15 2-15 2z")
+IC_PLUS = _svg("M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z")
 
 
 # On-demand scan controls. Shared verbatim by the dashboard and the sub-pages,
@@ -338,7 +339,8 @@ def build(jobs, archived=0):
   }}
   /* light mode only - per user preference (2026-08-10) */
   * {{ margin:0; padding:0; box-sizing:border-box; }}
-  html {{ color-scheme: light; }}
+  /* smooth anchor jumps (מומלץ להיום -> card); no pull-to-refresh on the phone */
+  html {{ color-scheme: light; scroll-behavior:smooth; overscroll-behavior-y:none; }}
   body {{ font-family:"Work Sans","Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--ink); }}
   .ic {{ width:1em; height:1em; vertical-align:-0.13em; flex-shrink:0; }}
   :focus-visible {{ outline:2px solid var(--pri); outline-offset:2px; }}
@@ -392,14 +394,36 @@ def build(jobs, archived=0):
   .bigbtn.scan:hover {{ background:var(--navy-h); }}
   .bigbtn.sec.scan {{ background:var(--card); color:var(--ink); border:1px solid var(--line2); }}
   .bigbtn.sec.scan:hover {{ background:var(--softer); }}
-  .scanst {{ font-size:11.5px; color:var(--mut); line-height:1.6; padding:7px 2px 0; }}
+  .scanst {{ font-size:12px; color:var(--mut); line-height:1.6; padding:7px 2px 0; }}
+  /* ---- add a job by hand ---- */
+  .addjob {{ background:var(--card); border:1px solid var(--line); border-radius:12px;
+             padding:14px 16px; margin-bottom:16px; box-shadow:var(--shadow); }}
+  .addjob .ah {{ display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px; margin-bottom:4px; }}
+  .addjob .ah .ic {{ color:var(--pri); }}
+  .addjob .asub {{ color:var(--mut); font-size:12.5px; margin-bottom:10px; }}
+  .addjob label {{ display:block; font-size:12.5px; font-weight:600; margin-bottom:4px; }}
+  .arow {{ display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; }}
+  .arow .grow {{ flex:1; min-width:220px; }}
+  .addjob input[type=url], .addjob select, .addjob textarea {{ width:100%; border:1px solid var(--line2);
+      background:var(--card); color:var(--ink); border-radius:9px; padding:9px 12px; font-size:13.5px;
+      font-family:inherit; min-height:40px; }}
+  .addjob textarea {{ resize:vertical; min-height:88px; margin-top:8px; }}
+  .addjob input:invalid:not(:placeholder-shown) {{ border-color:var(--err); }}
+  .addjob .aerr {{ color:var(--err); font-size:12.5px; margin-top:6px; display:none; }}
+  .addjob .aerr.show {{ display:block; }}
+  .addjob .amsg {{ font-size:12.5px; margin-top:8px; display:flex; align-items:center; gap:8px; color:var(--mut); }}
+  .addjob .amsg.ok {{ color:var(--ok); font-weight:600; }}
+  .addjob .amsg.err {{ color:var(--err); }}
+  .addjob .lnk {{ background:none; border:none; color:var(--pri); font-family:inherit; font-size:12.5px;
+                  cursor:pointer; padding:8px 0; text-decoration:underline; }}
+  .spin {{ display:inline-block; animation:cbrot 1.1s linear infinite; }}
   .scanst.run {{ color:var(--pri); font-weight:600; }}
   .scanst.err {{ color:var(--err); }}
   .review-box {{ margin-top:10px; border:1px solid var(--line2); border-radius:12px;
                  background:var(--softer); padding:10px 12px; }}
   .review-box .rvh {{ font-size:12px; font-weight:700; margin-bottom:8px; }}
   .review-box pre {{ margin:0 0 8px; max-height:260px; overflow:auto; white-space:pre-wrap;
-                     font-size:11.5px; line-height:1.5; background:var(--card);
+                     font-size:12px; line-height:1.5; background:var(--card);
                      border:1px solid var(--line); border-radius:8px; padding:8px 10px; }}
   .review-box .rvimg {{ display:block; max-width:100%; max-height:320px; object-fit:contain;
                         border:1px solid var(--line); border-radius:8px; margin-bottom:8px;
@@ -479,7 +503,7 @@ def build(jobs, archived=0):
             min-width:72px; height:72px; border-radius:12px; gap:1px;
             background:var(--gray-badge); color:var(--gray-badge-ink); }}
   .score .sn {{ font-size:24px; font-weight:800; letter-spacing:-.02em; }}
-  .score .sl {{ font-size:11px; font-weight:700; letter-spacing:.06em; opacity:.8; }}
+  .score .sl {{ font-size:12px; font-weight:700; letter-spacing:.06em; opacity:.8; }}
   .s10,.s9 {{ background:var(--mint); color:var(--mint-ink); }}
   .s8 {{ background:var(--mint-dim); color:var(--mint-ink); }}
   .s7 {{ background:var(--gray-badge); color:var(--gray-badge-ink); }}
@@ -577,7 +601,11 @@ def build(jobs, archived=0):
     nav.side {{ flex-direction:row; flex-wrap:wrap; }}
     .navi {{ padding:8px 12px; }}
     .sidegrow {{ display:none; }}
-    .sideact {{ flex-direction:row; }}
+    /* wrap, never overflow the 375px phone viewport (was a 33px horizontal scroll) */
+    .sideact {{ flex-direction:row; flex-wrap:wrap; align-items:center; width:100%; }}
+    .swtxt {{ white-space:nowrap; }}
+    .scangrp {{ border-top:none; margin:0; padding:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+    .scanh {{ padding:0; }}
     .bigbtn {{ width:auto; }}
     .sidefoot {{ display:none; }}
     main {{ margin-right:0; padding:16px 14px 120px; }}
@@ -621,6 +649,32 @@ def build(jobs, archived=0):
     <span class="chip mintc">ציון 8+ <b>{top}</b></span>
     <span class="chip pric">הוגשו/ראיון <b>{applied}</b></span>
     {archive_chip}
+  </div>
+  <div class="addjob" id="addjob">
+    <div class="ah">{IC_PLUS} מצאת משרה בעצמך? הוסף אותה ללוח</div>
+    <div class="asub">לינקדאין, קבוצת וואטסאפ, אתר משרות, חבר - הדבק קישור (או את הטקסט של המודעה), Claude יקרא, ייתן ציון ויוסיף כרטיס. נכנסת גם אם הציון נמוך.</div>
+    <div class="arow">
+      <div class="grow">
+        <label for="aj-url">קישור למשרה</label>
+        <input type="url" id="aj-url" placeholder="https://www.linkedin.com/jobs/view/..." inputmode="url" autocomplete="off" onblur="ajValidate()" onkeydown="if(event.key==='Enter')addJob()">
+      </div>
+      <div>
+        <label for="aj-src">מאיפה</label>
+        <select id="aj-src">
+          <option value="LinkedIn">LinkedIn</option>
+          <option value="WhatsApp">קבוצת וואטסאפ</option>
+          <option value="אתר משרות">אתר משרות</option>
+          <option value="אתר החברה">אתר החברה</option>
+          <option value="חבר/המלצה">חבר / המלצה</option>
+          <option value="אחר">אחר</option>
+        </select>
+      </div>
+      <button class="btn primary" id="aj-go" onclick="addJob()" style="min-height:40px">הוסף ללוח</button>
+      <button class="lnk" id="aj-more" onclick="ajToggleText()">אין קישור? הדבק את הטקסט</button>
+    </div>
+    <textarea id="aj-text" style="display:none" placeholder="הדבק כאן את הודעת הוואטסאפ / גוף המודעה - חברה, תפקיד, מיקום, דרישות" aria-label="טקסט המודעה"></textarea>
+    <div class="aerr" id="aj-err" role="alert"></div>
+    <div class="amsg" id="aj-msg" aria-live="polite"></div>
   </div>
   <div id="batch">
     <button class="bstop" onclick="stopBatch()">עצור</button>
@@ -681,15 +735,100 @@ async function serverUp() {{
 function serverDownMsg() {{
   toast("השרת המקומי כבוי - דאבל-קליק על start-cv-server.bat בתיקיית JobHunt ונסה שוב");
 }}
+// ---- add a job by hand (link / pasted text -> headless Claude -> tracker) ----
+function ajToggleText() {{
+  const ta = document.getElementById("aj-text");
+  const open = ta.style.display === "none";
+  ta.style.display = open ? "block" : "none";
+  document.getElementById("aj-more").textContent = open ? "הסתר את תיבת הטקסט" : "אין קישור? הדבק את הטקסט";
+  if (open) ta.focus();
+}}
+function ajValidate() {{
+  const url = document.getElementById("aj-url").value.trim();
+  const err = document.getElementById("aj-err");
+  if (url && !/^https?:\\/\\/\\S+$/.test(url)) {{
+    err.textContent = "זה לא נראה כמו קישור - צריך להתחיל ב-http:// או https://";
+    err.classList.add("show");
+    return false;
+  }}
+  err.classList.remove("show");
+  return true;
+}}
+async function addJob() {{
+  if (!ajValidate()) return;
+  const url = document.getElementById("aj-url").value.trim();
+  const text = document.getElementById("aj-text").value.trim();
+  const source = document.getElementById("aj-src").value;
+  const err = document.getElementById("aj-err");
+  const msg = document.getElementById("aj-msg");
+  if (!url && text.length < 30) {{
+    err.textContent = url === "" && text === "" ? "הדבק קישור, או פתח את תיבת הטקסט והדבק את המודעה"
+                                                 : "הטקסט קצר מדי - צריך לפחות כמה שורות מהמודעה";
+    err.classList.add("show");
+    if (!text) ajToggleText();
+    return;
+  }}
+  if (!(await serverUp())) return serverDownMsg();
+  const go = document.getElementById("aj-go");
+  go.disabled = true; go.textContent = "שולח...";
+  msg.className = "amsg"; msg.innerHTML = "";
+  let j;
+  try {{
+    j = await (await fetch(BASE + "/add-job", {{ method: "POST",
+      body: JSON.stringify({{ url: url, text: text, source: source }}), signal: AbortSignal.timeout(10000) }})).json();
+  }} catch (e) {{ go.disabled = false; go.textContent = "הוסף ללוח"; return toast("השרת לא מגיב"); }}
+  if (!j.ok) {{
+    go.disabled = false; go.textContent = "הוסף ללוח";
+    err.textContent = j.detail || "לא התקבל"; err.classList.add("show");
+    return;
+  }}
+  go.textContent = "Claude קורא...";
+  msg.innerHTML = '<span class="spin">◐</span> Claude קורא את המשרה, נותן ציון ומוסיף כרטיס - בדרך כלל דקה-שתיים (המעקב בקונסול למטה)';
+  const t0 = Date.now();
+  while (Date.now() - t0 < 16 * 60 * 1000) {{
+    await new Promise(r => setTimeout(r, 4000));
+    let s;
+    try {{ s = await (await fetch(BASE + "/add-status?key=" + encodeURIComponent(j.key), {{ signal: AbortSignal.timeout(3000) }})).json(); }}
+    catch (e) {{ continue; }}
+    if (s.status === "running") continue;
+    go.disabled = false; go.textContent = "הוסף ללוח";
+    if (s.status === "done") {{
+      msg.className = "amsg ok"; msg.textContent = s.detail;
+      document.getElementById("aj-url").value = ""; document.getElementById("aj-text").value = "";
+      toast(s.detail);
+      const id = s.result && s.result.id;
+      setTimeout(() => location.href = location.pathname + (id ? "#job-" + id : ""), 1400);
+      setTimeout(() => location.reload(), 1500);
+      return;
+    }}
+    msg.className = "amsg " + (s.status === "duplicate" ? "" : "err");
+    msg.textContent = s.detail || "לא נוסף";
+    return;
+  }}
+  go.disabled = false; go.textContent = "הוסף ללוח";
+  msg.className = "amsg err"; msg.textContent = "נתקע - בדוק את הקונסול למטה";
+}}
 // ---- search / sort / filter (one view function) ----
 let curFilter = "הכל";
-function filt(btn) {{
+function filt(btn, silent) {{
   document.querySelectorAll(".f").forEach(b => b.classList.remove("on"));
   btn.classList.add("on");
   curFilter = btn.dataset.f;
   applyView();
 }}
+function syncUrl() {{
+  // the view state lives in the URL so a filtered/sorted board can be bookmarked or shared
+  const p = new URLSearchParams();
+  if (curFilter !== "הכל") p.set("f", curFilter);
+  const by = document.getElementById("sortsel").value;
+  if (by !== "score") p.set("s", by);
+  const q = (document.getElementById("q").value || "").trim();
+  if (q) p.set("q", q);
+  const qs = p.toString();
+  history.replaceState(null, "", location.pathname + (qs ? "?" + qs : "") + location.hash);
+}}
 function applyView() {{
+  syncUrl();
   const q = (document.getElementById("q").value || "").trim().toLowerCase();
   document.querySelectorAll(".card").forEach(c => {{
     const okF = curFilter === "הכל" || c.dataset.status === curFilter;
@@ -1257,6 +1396,15 @@ function cbCopyFallback(txt, done) {{
   }}
   document.body.removeChild(ta);
 }}
+// restore a bookmarked view (?f=חדש&s=date&q=nvidia) before the first paint of the list
+(() => {{
+  const p = new URLSearchParams(location.search);
+  const f = p.get("f"), s = p.get("s"), q = p.get("q");
+  if (s) document.getElementById("sortsel").value = s;
+  if (q) document.getElementById("q").value = q;
+  const fb = f && Array.from(document.querySelectorAll(".f")).find(b => b.dataset.f === f);
+  if (fb) filt(fb); else if (s || q) applyView();
+}})();
 cbPoll();
 selChanged();
 batchPoll();
@@ -1301,7 +1449,7 @@ SUB_CSS = """
     --shadow:0 4px 12px rgba(30,41,59,.05);
   }
   * { margin:0; padding:0; box-sizing:border-box; }
-  html { color-scheme: light; }
+  html { color-scheme: light; scroll-behavior:smooth; overscroll-behavior-y:none; }
   body { font-family:"Work Sans","Segoe UI",Arial,sans-serif; background:var(--bg); color:var(--ink); }
   .ic { width:1em; height:1em; vertical-align:-0.13em; flex-shrink:0; }
   :focus-visible { outline:2px solid var(--pri); outline-offset:2px; }
@@ -1373,7 +1521,10 @@ SUB_CSS = """
     .userbox { flex-direction:row; gap:8px; align-items:baseline; margin:0; padding:6px 12px; }
     nav.side { flex-direction:row; flex-wrap:wrap; }
     .sidegrow { display:none; }
-    .sideact { flex-direction:row; }
+    .sideact { flex-direction:row; flex-wrap:wrap; align-items:center; width:100%; }
+    .swtxt { white-space:nowrap; }
+    .scangrp { border-top:none; margin:0; padding:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .scanh { padding:0; }
     .bigbtn { width:auto; }
     .sidefoot { display:none; }
     main { margin-right:0; padding:16px 14px 60px; }
@@ -1876,15 +2027,15 @@ def build_submissions(jobs_n=0, archived_n=0):
   .btn.del:hover {{ background:var(--errbg); }}
   .btn:disabled {{ opacity:.6; cursor:default; }}
   .lnk {{ background:none; border:none; color:var(--pri); font-family:inherit; font-size:12.5px; cursor:pointer;
-          padding:4px 0; text-decoration:underline; }}
+          padding:10px 0; min-height:44px; text-decoration:underline; }}
   .q {{ background:var(--rib-p-bg); color:var(--rib-p-ink); border-radius:10px; padding:10px 12px;
         font-size:13.5px; line-height:1.6; margin-bottom:10px; white-space:pre-wrap; }}
   .lc.err .q {{ background:var(--errbg); color:var(--err); }}
   .msg {{ background:var(--softer); border:1px solid var(--line); border-radius:10px; padding:9px 12px; margin-bottom:10px; }}
-  .msg .who, .bub .who {{ font-size:11.5px; font-weight:700; color:var(--mut); margin-bottom:3px; }}
+  .msg .who, .bub .who {{ font-size:12px; font-weight:700; color:var(--mut); margin-bottom:3px; }}
   .msg .txt, .bub .txt {{ font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word;
                           max-height:260px; overflow:auto; }}
-  .log {{ background:#0f172a; color:#94a3b8; border-radius:8px; padding:8px 10px; font-size:11.5px;
+  .log {{ background:#0f172a; color:#94a3b8; border-radius:8px; padding:8px 10px; font-size:12px;
           font-family:Consolas,"Courier New",monospace; white-space:pre-wrap; word-break:break-word;
           margin:0 0 10px; max-height:150px; overflow:auto; }}
   .fh {{ font-size:12.5px; font-weight:700; margin:4px 0 6px; }}
@@ -1894,7 +2045,7 @@ def build_submissions(jobs_n=0, archived_n=0):
   .fld th {{ width:32%; color:var(--mut); font-weight:600; background:var(--softer); }}
   .fld tr.inf td {{ background:#fffbe6; }}
   .tag {{ display:inline-block; background:var(--rib-y-bg); color:var(--rib-y-ink); border-radius:9999px;
-          padding:1px 8px; font-size:11px; font-weight:700; margin-right:6px; }}
+          padding:1px 8px; font-size:12px; font-weight:700; margin-right:6px; }}
   .rv {{ font-size:12px; line-height:1.5; background:var(--card); border:1px solid var(--line); border-radius:8px;
          padding:8px 10px; white-space:pre-wrap; max-height:260px; overflow:auto; margin-bottom:10px; }}
   .shot {{ display:block; margin-bottom:10px; }}
